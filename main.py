@@ -8,6 +8,8 @@ import argparse
 import json
 import os
 import time
+import random
+from economic_action import ActionSpec
 from datetime import datetime
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -129,6 +131,12 @@ def write_metadata(args, result_folder):
             "expire_and_enqueue_requests",
         ],
     }
+    spec = ActionSpec(getattr(args, "num_zone", 1), getattr(args, "action_mode", "price_only"),
+                      getattr(args, "compensation_min", 0.5), getattr(args, "compensation_max", 2.0))
+    metadata["action_space"] = spec.metadata()
+    metadata["frequency"] = args.frequency
+    if not hasattr(args, "num_zone"):
+        metadata["action_space"].update(num_zone=None, dimension=None)
     if existing_runtime is not None:
         metadata["runtime"] = existing_runtime
     with open(metadata_path, "w", encoding="utf-8") as handle:
@@ -209,6 +217,10 @@ def get_arguments(argv):
                         help='cpu or gpu (cuda)')
     parser.add_argument('-f', '--frequency', type=int, default=1,
                         help='pricing freqency')  # update the price every minute
+    parser.add_argument('--action_mode', choices=['price_only', 'joint'], default='price_only',
+                        help='joint: TD3 controls passenger price and independent order compensation')
+    parser.add_argument('--compensation_min', type=float, default=0.5)
+    parser.add_argument('--compensation_max', type=float, default=2.0)
     parser.add_argument('-pc', '--policy_constr', action='store_true', default=False,
                         help='constrained pricing change speed')  # constrained policy
     parser.add_argument('-re', '--resume', type=int, default=0,
@@ -273,6 +285,21 @@ def get_arguments(argv):
     parser.add_argument('--trace_only', action='store_true', default=False,
                         help='when existing test logs are present, rerun only the traced test without overwriting logs')
     args = normalize_mechanism_flags(parser.parse_args(argv))
+    try:
+        ActionSpec(1, args.action_mode, args.compensation_min, args.compensation_max)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if args.frequency <= 0 or args.batch_size <= 0 or args.n_epochs <= 0 or args.resume < 0:
+        parser.error('frequency, batch_size and n_epochs must be positive; resume must be nonnegative')
+    if args.action_mode == 'joint':
+        if args.pricing_alg not in {'TD3_MLP', 'TD3_CNN'}:
+            parser.error('joint actions require TD3_MLP or TD3_CNN')
+        if args.policy_constr:
+            parser.error('policy_constr is a legacy price-only option; joint actions use independent box bounds')
+        if args.searching not in {'Gaussian', 'Greedy'}:
+            parser.error('joint exploration must be Gaussian or Greedy')
+        if args.mode in {'train', 'all'} and args.resume >= args.n_epochs:
+            parser.error('resume must be smaller than n_epochs')
 
     return args
 
@@ -287,6 +314,7 @@ if __name__ == '__main__':
     if args.device == 'cuda':
         torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
     permutation_tag = '' if not args.od_permutation else '_perm'
     constraint_tag = '' if not args.policy_constr else '_constr' # unused for this study
@@ -297,6 +325,9 @@ if __name__ == '__main__':
     settings_tag = args.pricing_alg + permutation_tag + constraint_tag + auto_tag + forget_tag + "_" +args.searching + "_" +\
                    str(args.policy_delay) +"_"+str(args.position_encode) + "_" + args.name
     settings_tag += bounded_rationality_tag(args)
+    if args.action_mode == 'joint':
+        settings_tag += '_joint_q{}_{}_f{}'.format(tag_float(args.compensation_min),
+            tag_float(args.compensation_max), args.frequency)
     hyperp_tag = str(args.batch_size) + "_" + str(args.actor_lr) + "_" + str(args.critic_lr) + "_" + str(args.kernel_size)
 
     # prepare the folders for storing the results
@@ -364,11 +395,14 @@ if __name__ == '__main__':
     args.num_zone = td.shape[0]
     T_train = dd_train.shape[0]
     T_test = dd_test.shape[0]
+    write_metadata(args, args.store_res_folder)
 
     # initialize environment
     if args.verbose:
         print("Initialize environment, vehicle num: " + str(len(vp)))
-    if args.pricing_alg == 'PPO_CNN':
+    if args.action_mode == 'joint':
+        controller = None
+    elif args.pricing_alg == 'PPO_CNN':
         controller = Platform(td, tt, args.num_zone, actor_lr=args.actor_lr, critic_lr=args.critic_lr, option='PPO_CNN',
                               permutation=permutation, permutation2=permutation2, kernel_size=args.kernel_size,
                               stride=args.stride, pooling=args.pooling, device=args.device, writer=writer,
@@ -446,6 +480,32 @@ if __name__ == '__main__':
                               )
 
     env = Environment(td, tt, vp, args.num_zone, frequency=args.frequency, br_config=args)
+
+    if args.action_mode == 'joint':
+        # This separate runner leaves legacy replay and decision scheduling intact.
+        from joint_training import train_joint, evaluate_joint
+        controller = Platform(td, tt, args.num_zone, option=args.pricing_alg,
+            actor_lr=args.actor_lr, critic_lr=args.critic_lr, device=args.device, writer=writer,
+            update_freq=args.frequency, veh_num=len(vp), demand_mean=np.mean(dd_train, axis=0),
+            demand_std=np.std(dd_train, axis=0), wage_mean=np.mean(vp), wage_std=np.std(vp),
+            permutation=permutation, permutation2=permutation2, od_permutation=args.od_permutation,
+            kernel_size=args.kernel_size, stride=args.stride, pooling=args.pooling,
+            searching=args.searching, policy_delay=args.policy_delay, position_encode=args.position_encode,
+            auto_correlation=args.auto_correlation, forget=args.forget, T_train=T_train,
+            action_mode='joint', compensation_min=args.compensation_min, compensation_max=args.compensation_max)
+        if is_train_mode:
+            start_sync = safe_cuda_synchronize(args.device)
+            start_time, start_counter = datetime.now(), time.perf_counter()
+            train_joint(env, controller, dd_train, writer, args)
+            end_sync = safe_cuda_synchronize(args.device)
+            runtime = build_runtime_info(args, start_time, datetime.now(), start_counter,
+                                        time.perf_counter(), start_sync and end_sync)
+            update_runtime_metadata(os.path.join(args.store_res_folder, 'metadata.json'), runtime)
+            write_runtime_summary(args.store_res_folder, runtime, args)
+            writer.close()
+        else:
+            evaluate_joint(env, controller, dd_train, dd_test, args)
+        sys.exit(0)
 
     # input: travel distance, travel time matrices, initial vehicle distribution
     # output: time step, profit, reposition cost

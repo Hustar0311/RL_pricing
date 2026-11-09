@@ -121,6 +121,7 @@ class Platform:
         self.option = option
         self.device = device
         self.searching = searching
+        self.pricer.action_spec = self.action_spec
 
     def observe(self, env, od_permutation=True):
         """One state builder for joint inference and both sides of replay."""

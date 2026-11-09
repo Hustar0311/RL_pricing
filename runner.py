@@ -74,7 +74,8 @@ def _finalize_br_stats(total):
 def train(env, controller, dd_train, T_train, baseline, writer, args):
     thrng = torch.Generator("cpu")
     # print(np.sum(baseline))
-    controller.pricer.initialize(thrng)
+    if args.resume == 0:
+        controller.pricer.initialize(thrng)
     if args.device == 'cuda':
         controller.pricer.cuda()
     if args.verbose:
@@ -116,9 +117,6 @@ def train(env, controller, dd_train, T_train, baseline, writer, args):
             temp_demands = _prepare_demand_batch(dd_train_, temp_p, args)
         temp_demand = _activate_demand(env, temp_demands, t % args.frequency, temp_p)
         env.step(temp_demand, temp_schedule, temp_p)
-
-    for e in range(args.resume):
-        controller.decay_searching_variance()
 
     for e in range(args.resume, args.n_epochs):
         epoch_start_counter = time.perf_counter()
