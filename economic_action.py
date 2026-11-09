@@ -46,7 +46,7 @@ class ActionSpec:
 
     def metadata(self):
         return {
-            "version": 1, "state_version": 1 if self.mode == "joint" else 0,
+            "version": 1, "state_version": 2 if self.mode == "joint" else 0,
             "mode": self.mode, "num_zone": self.num_zone,
             "dimension": self.dimension,
             "layout": ["price", "compensation"] if self.mode == "joint" else ["price"],

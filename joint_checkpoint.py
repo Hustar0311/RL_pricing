@@ -47,8 +47,10 @@ def load_checkpoint(controller, env, args, epoch, training=True):
         raise ValueError("checkpoint action space, state layout or experiment configuration does not match")
     if payload.get("epoch") != epoch:
         raise ValueError("checkpoint epoch does not match requested resume")
-    if args.device == "cuda":
-        controller.pricer.cuda()
+    controller.device = args.device
+    controller.buffer.device = args.device
+    for name in ["actor", "actor_target", "critic", "critic_target"]:
+        getattr(controller.pricer, name).to(args.device)
     for key, value in payload["models"].items():
         if training or not key.endswith("optim"):
             getattr(controller.pricer, key).load_state_dict(value)

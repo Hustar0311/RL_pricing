@@ -9,6 +9,7 @@ import json
 import os
 import time
 import random
+import subprocess
 from economic_action import ActionSpec
 from datetime import datetime
 import torch
@@ -134,6 +135,11 @@ def write_metadata(args, result_folder):
     spec = ActionSpec(getattr(args, "num_zone", 1), getattr(args, "action_mode", "price_only"),
                       getattr(args, "compensation_min", 0.5), getattr(args, "compensation_max", 2.0))
     metadata["action_space"] = spec.metadata()
+    try:
+        metadata["code_commit"] = subprocess.check_output(
+            ['git', 'rev-parse', 'HEAD'], cwd=os.path.dirname(os.path.abspath(__file__)), text=True).strip()
+    except (OSError, subprocess.CalledProcessError):
+        metadata["code_commit"] = None
     metadata["frequency"] = args.frequency
     if not hasattr(args, "num_zone"):
         metadata["action_space"].update(num_zone=None, dimension=None)
@@ -515,6 +521,8 @@ if __name__ == '__main__':
             if args.verbose:
                 print("Load model")
             print("Resume training from epoch " + str(args.resume))
+            if args.device == 'cuda':
+                controller.pricer.cuda()
             controller.pricer.load_weights(
                 args.store_model_folder + "/", args.resume)
             controller.buffer.load(args.store_model_folder + "/", args.resume)

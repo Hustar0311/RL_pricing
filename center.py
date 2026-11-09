@@ -23,6 +23,7 @@ class Platform:
         if action_mode == "joint" and option not in {"TD3_MLP", "TD3_CNN"}:
             raise ValueError("joint actions require TD3_MLP or TD3_CNN")
         self.num_zone = num_zone
+        self.history_duration = max_waiting if action_mode == "joint" else max(max_waiting // update_freq, 1)
         self.veh_num = veh_num
         if demand_mean is not None:
             self.demand_mean = demand_mean
@@ -68,19 +69,19 @@ class Platform:
                                   writer=writer, position_encode = position_encode, max_len = T_train)
         elif option == 'TD3_CNN':
             if od_permutation:
-                self.pricer = TD3_CNN_deep(num_zone, max(max_waiting//update_freq, 1), max_step + 1, 2*max_waiting, \
+                self.pricer = TD3_CNN_deep(num_zone, self.history_duration, max_step + 1, 2*max_waiting, \
                                            kernel_size, stride, max(permutation[0])+1, \
                                        max(permutation[1])+1, pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
                                         max_len = T_train, action_mode=action_mode)
             else:
-                self.pricer = TD3_CNN_deep(num_zone, max(max_waiting//update_freq, 1), max_step + 1, max_waiting, \
+                self.pricer = TD3_CNN_deep(num_zone, self.history_duration, max_step + 1, max_waiting, \
                                            kernel_size, stride, num_zone, num_zone, \
                                        pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
                                            max_len = T_train, action_mode=action_mode)
         else:
-            self.pricer = TD3_MLP(num_zone, max_waiting, max(max_waiting//update_freq, 1), max_step + 1, actor_lr = actor_lr, critic_lr = critic_lr,
+            self.pricer = TD3_MLP(num_zone, max_waiting, self.history_duration, max_step + 1, actor_lr = actor_lr, critic_lr = critic_lr,
                                    writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
                                   max_len = T_train, action_mode=action_mode)
         print(option)
@@ -125,7 +126,7 @@ class Platform:
 
     def observe(self, env, od_permutation=True):
         """One state builder for joint inference and both sides of replay."""
-        duration = max(5 // self.update_freq, 1)
+        duration = self.history_duration
         counts, vehicles, ongoing, prices, income, zones = self.preprocess(
             env.pass_count, env.veh_count, env.get_ongoing_veh(),
             env.pricing_multipliers[:duration], env.avg_profit, env.zone_profit)
