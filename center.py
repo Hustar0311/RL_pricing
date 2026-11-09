@@ -6,6 +6,8 @@ from random import sample
 from scipy.optimize import linear_sum_assignment as solve_dense
 from pricer import TD3_MLP, TD3_CNN_deep, PPO_MLP, PPO_CNN_deep
 import pickle
+from economic_action import ActionSpec
+from joint_replay import JointMemory
 from scipy.optimize import linprog
 
 MAXP = 3
@@ -15,7 +17,11 @@ class Platform:
     def __init__(self, travel_distance, travel_time, num_zone, max_waiting = 5, max_step = 6, option = 'TD3_MLP', permutation = None, permutation2 = None,
         kernel_size = 3, stride = 1, pooling = 2, device = 'cpu', actor_lr=0.0001, critic_lr=0.001, update_freq = 1, writer = None, od_permutation = True,
         veh_num = 1, demand_mean = None, demand_std = None, wage_mean = None, wage_std = None, searching = 'Gaussian', policy_delay = 30, position_encode = 64,
-                  auto_correlation = False, forget = False, T_train = 10080):
+                  auto_correlation = False, forget = False, T_train = 10080,
+                  action_mode="price_only", compensation_min=0.5, compensation_max=2.0):
+        self.action_spec = ActionSpec(num_zone, action_mode, compensation_min, compensation_max)
+        if action_mode == "joint" and option not in {"TD3_MLP", "TD3_CNN"}:
+            raise ValueError("joint actions require TD3_MLP or TD3_CNN")
         self.num_zone = num_zone
         self.veh_num = veh_num
         if demand_mean is not None:
@@ -66,24 +72,26 @@ class Platform:
                                            kernel_size, stride, max(permutation[0])+1, \
                                        max(permutation[1])+1, pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                        max_len = T_train)
+                                        max_len = T_train, action_mode=action_mode)
             else:
                 self.pricer = TD3_CNN_deep(num_zone, max(max_waiting//update_freq, 1), max_step + 1, max_waiting, \
                                            kernel_size, stride, num_zone, num_zone, \
                                        pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                           max_len = T_train)
+                                           max_len = T_train, action_mode=action_mode)
         else:
             self.pricer = TD3_MLP(num_zone, max_waiting, max(max_waiting//update_freq, 1), max_step + 1, actor_lr = actor_lr, critic_lr = critic_lr,
                                    writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                  max_len = T_train)
+                                  max_len = T_train, action_mode=action_mode)
         print(option)
         if option.startswith('TD3'):
             self.buffer = Memory(size = (10*T_train)//update_freq, device=device)
         else:
             self.buffer = Memory(size = T_train//update_freq * 2, device=device)
+        if action_mode == "joint":
+            self.buffer = JointMemory(max(10, (10*T_train)//update_freq), self.action_spec.dimension, device)
 
-        self.prices = torch.zeros((1, self.num_zone))
+        self.prices = torch.zeros((1, self.action_spec.dimension))
 
         self.last_state = None
         self.last_state2d = None
@@ -96,7 +104,7 @@ class Platform:
         self.epsilon_min = 0.1
 
         if self.auto_correlation:
-            self.noise = torch.zeros((10, self.num_zone))
+            self.noise = torch.zeros((10, self.action_spec.dimension))
 
         # For PPO
         self.action_std = 0.5
@@ -113,6 +121,55 @@ class Platform:
         self.option = option
         self.device = device
         self.searching = searching
+
+    def observe(self, env, od_permutation=True):
+        """One state builder for joint inference and both sides of replay."""
+        duration = max(5 // self.update_freq, 1)
+        counts, vehicles, ongoing, prices, income, zones = self.preprocess(
+            env.pass_count, env.veh_count, env.get_ongoing_veh(),
+            env.pricing_multipliers[:duration], env.avg_profit, env.zone_profit)
+        parts = [vehicles, ongoing.flatten(), prices.flatten(), np.array([income]), zones.flatten()]
+        if self.action_spec.mode == "joint":
+            q = env.compensation_multipliers[:duration]
+            # Histories may contain q=p during neutral warmup; do not clip state.
+            q = (np.log(q) - np.log(self.action_spec.compensation_min)) / (
+                np.log(self.action_spec.compensation_max) - np.log(self.action_spec.compensation_min))
+            parts.append(q.flatten())
+        if self.option.endswith("CNN"):
+            state2d = torch.as_tensor(counts, dtype=torch.float32)
+            if od_permutation:
+                temp = torch.zeros((state2d.size(0)*2, max(self.permutation[0])+1, max(self.permutation[1])+1))
+                temp[:state2d.size(0), self.permutation[0], self.permutation[1]] = state2d.reshape(state2d.size(0), -1)
+                temp[state2d.size(0):, self.permutation2[0], self.permutation2[1]] = state2d.reshape(state2d.size(0), -1)
+                state2d = temp
+        else:
+            parts.insert(0, counts.flatten())
+            state2d = torch.zeros(1)
+        state = torch.as_tensor(np.concatenate(parts), dtype=torch.float32)
+        return state, state2d
+
+    def update_action(self, env, t, mode, od_permutation=True):
+        if self.action_spec.mode != "joint":
+            raise ValueError("use update_price for legacy price-only control")
+        state, state2d = self.observe(env, od_permutation)
+        with torch.no_grad():
+            action = self.pricer.select_action(state[None].to(self.device), state2d[None].to(self.device),
+                                               torch.tensor([[t]], device=self.device)).cpu()
+            if mode == "train":
+                if self.searching == "Greedy":
+                    if np.random.random() < max(self.epsilon, self.epsilon_min):
+                        action = self.pricer.random_action()
+                elif self.searching == "Gaussian":
+                    noise = torch.randn_like(action) * max(self.epsilon, self.epsilon_min)
+                    if self.auto_correlation:
+                        self.noise[:-1] = self.noise[1:].clone()
+                        self.noise[-1] = noise[0] / np.sqrt(10)
+                        noise = self.noise.sum(0, keepdim=True)
+                    action += noise
+                else:
+                    raise ValueError("unsupported joint exploration mode")
+            self.prices = action.clamp(-1, 1).detach().clone()
+        return self.action_spec.decode(self.prices.numpy())
         
     def update_price(self, pass_count, veh_count, ongoing_veh_count, avg_profit, zone_profits, price_multipliers,  \
                      t, mode, od_permutation = True,\

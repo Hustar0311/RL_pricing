@@ -23,11 +23,14 @@ class ActorMLP(torch.nn.Module):
             max_traveling: int,
             shapes: List[int],
             n=32,  # for positional encoding, 0 for using nn
-            max_len=10080
+            max_len=10080,
+            extra_state_dim=0,
+            bounded_output=False
     ) -> None:
         super(ActorMLP, self).__init__()
         buf = []
-        shapes = [size * size * max_waiting + size * (max_traveling + max_duration) + size + 1 + n] + shapes
+        self.bounded_output = bounded_output
+        shapes = [size * size * max_waiting + size * (max_traveling + max_duration) + size + 1 + n + extra_state_dim] + shapes
         for (num_ins, num_outs) in zip(shapes[:-1], shapes[1:]):
             buf.append(torch.nn.Linear(num_ins, num_outs))
         self.linears = torch.nn.ModuleList(buf)
@@ -77,7 +80,7 @@ class ActorMLP(torch.nn.Module):
         # print(x)
         x = self.linears[-1](x)
         # print(x.size())
-        return x
+        return torch.tanh(x) if self.bounded_output else x
 
 class TwinCriticMLP(torch.nn.Module):
     def __init__(
@@ -88,12 +91,15 @@ class TwinCriticMLP(torch.nn.Module):
             max_traveling: int,
             shapes: List[int],
             n=32,
-            max_len=10080
+            max_len=10080,
+            extra_state_dim=0,
+            action_dim=None
     ) -> None:
         super(TwinCriticMLP, self).__init__()
         buf = []
         buf2 = []
-        shapes = [size * size * max_waiting + size * (max_traveling + max_duration) + size + size + 1 + n] + shapes
+        action_dim = size if action_dim is None else action_dim
+        shapes = [size * size * max_waiting + size * (max_traveling + max_duration) + size + action_dim + 1 + n + extra_state_dim] + shapes
         for (num_ins, num_outs) in zip(shapes[:-1], shapes[1:]):
             buf.append(torch.nn.Linear(num_ins, num_outs))
             buf2.append(torch.nn.Linear(num_ins, num_outs))
@@ -174,9 +180,11 @@ class ActorCNN(torch.nn.Module):
             kernel_size_conv: int, stride_size_conv: int, kernel_size_pool: int,
             stride_size_pool: int,
             n=32,
-            max_len=10080
+            max_len=10080,
+            bounded_output=False
     ) -> None:
         super(ActorCNN, self).__init__()
+        self.bounded_output = bounded_output
         buf_conv = []
         for (in_channels, out_channels) in zip(channels[:-1], channels[1:]):
             buf_conv.append(torch.nn.Conv2d(in_channels=in_channels, out_channels=out_channels, \
@@ -244,7 +252,7 @@ class ActorCNN(torch.nn.Module):
         # print(x)
         # scale = 2*np.log(2)
         # x = scale * torch.sigmoid(x) - np.log(2)
-        return x
+        return torch.tanh(x) if self.bounded_output else x
 
 class TwinCriticCNN(torch.nn.Module):
     def __init__(
