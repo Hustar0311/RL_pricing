@@ -192,6 +192,7 @@ def write_runtime_summary(result_dir, runtime_info, args):
         "enabled_mechanisms": enabled_mechanisms(args),
         "beta_passenger": args.beta_passenger if args.use_passenger_entry_br else None,
         "beta_driver": args.beta_driver if args.use_driver_online_br else None,
+        "action_space": ActionSpec(args.num_zone, args.action_mode, args.compensation_min, args.compensation_max).metadata(),
         **runtime_info,
     }
     with open(os.path.join(result_dir, "runtime_summary.json"), "w", encoding="utf-8") as handle:

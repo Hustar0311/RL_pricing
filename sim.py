@@ -243,6 +243,8 @@ class Environment:
         compensation_multiplier = validate_control(
             price_multiplier if compensation_multiplier is None else compensation_multiplier,
             self.num_zone, "compensation")
+        passenger_context_before = (self._passenger_decision_context(price_multiplier)
+                                    if self._pending_passenger_audit is None else None)
         #### at time t
         # dispatch_veh
         waiting_request_tensor_before = self.pass_count.copy()
@@ -365,7 +367,8 @@ class Environment:
         self.avg_profit -= self.avg_profits[0] / 30
         self.avg_profits[:-1] = self.avg_profits[1:]
         income_basis = compensation_basis_total if self.action_mode == "joint" else tot_profit
-        self.avg_profits[-1] = income_basis / (np.sum(self.veh_count) + served_pass + 1e-4)
+        income_denominator = np.sum(self.veh_count) + served_pass + 1e-4
+        self.avg_profits[-1] = income_basis / income_denominator
         self.avg_profit += self.avg_profits[-1] / 30
         self.zone_profit -= self.zone_profits[0, :] / 30
         self.zone_profits[:-1, :] = self.zone_profits[1:, :]
@@ -521,7 +524,7 @@ class Environment:
                 "passenger_enter_rate": 1.0 if new_demand_count > 0 else 0.0,
                 "passenger_balk_count": 0.0,
             }
-            context = self._passenger_decision_context(price_multiplier)
+            context = passenger_context_before
             passenger_audit = {
                 **context,
                 "passenger_enter_probability": np.ones(self.num_zone, dtype=float),
@@ -565,6 +568,9 @@ class Environment:
             "negative_margin_order_count": int(negative_margin_order_count),
             "negative_margin_total": float(negative_margin_total),
             "driver_income_basis": float(income_basis),
+            "driver_income_denominator": float(income_denominator),
+            "driver_income_window": np.asarray(self.avg_profits, dtype=float).copy(),
+            "joint_action_enabled": self.action_mode == "joint",
             "waiting_request_tensor_before": waiting_request_tensor_before,
             "waiting_request_tensor_after": self.pass_count.copy(),
             "idle_supply_vector": idle_supply_before,

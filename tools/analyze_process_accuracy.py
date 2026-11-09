@@ -275,18 +275,41 @@ def audit_snapshots(result_dir, test_id, zone_df, metadata, selected_steps):
         distance = snapshot["travel_distance_matrix"]
         travel_time = snapshot["travel_time_matrix"]
         history = snapshot["pricing_history_before"]
+        joint = metadata.get("action_space", {}).get("mode") == "joint"
+        if joint and "compensation_history_before" not in snapshot.files:
+            raise ValueError("joint audit snapshot is missing request-locked compensation history")
+        compensation_history = snapshot["compensation_history_before"] if "compensation_history_before" in snapshot.files else history
         if len(service_origin):
-            fares = history[wait_index, service_origin] * (
+            base_fares = (
                 alpha0 + alpha1 * distance[service_origin, service_dest]
                 + beta1 * travel_time[service_origin, service_dest]
             )
+            fares = history[wait_index, service_origin] * base_fares
+            compensation_basis = compensation_history[wait_index, service_origin] * base_fares
+            pickup_costs = alpha2 * distance[vehicle_origin, service_origin] + beta2 * travel_time[vehicle_origin, service_origin]
             service_expense = np.sum(
-                alpha2 * distance[vehicle_origin, service_origin]
-                + beta2 * travel_time[vehicle_origin, service_origin] + delta * fares
+                pickup_costs + delta * compensation_basis
             )
         else:
             fares = np.asarray([], dtype=float)
+            compensation_basis, pickup_costs = np.asarray([], dtype=float), np.asarray([], dtype=float)
             service_expense = 0.0
+        if "driver_payment_total" in snapshot.files:
+            margins = fares - delta * compensation_basis - pickup_costs
+            for rule, recorded, recomputed in [
+                ("driver_payment_formula", snapshot["driver_payment_total"], delta * compensation_basis.sum()),
+                ("pickup_cost_formula", snapshot["pickup_cost_total"], pickup_costs.sum()),
+                ("negative_margin_formula", snapshot["negative_margin_total"], np.maximum(-margins, 0).sum()),
+                ("negative_margin_count", snapshot["negative_margin_order_count"], np.sum(margins < 0)),
+            ]:
+                rows.append(result_row(test_id, step, rule, float(recorded), float(recomputed)))
+        if "driver_income_window" in snapshot.files:
+            income_basis = compensation_basis.sum() if joint else fares.sum()
+            rows.append(result_row(test_id, step, "driver_income_basis_formula", float(snapshot["driver_income_basis"]), float(income_basis)))
+            rows.append(result_row(test_id, step, "driver_income_last_observation", float(snapshot["driver_income_window"][-1]),
+                                   float(income_basis / snapshot["driver_income_denominator"])))
+            rows.append(result_row(test_id, step, "driver_income_rolling_mean", float(snapshot["avg_profit_for_driver_decisions"]),
+                                   float(snapshot["driver_income_window"].mean())))
         reposition_origin = snapshot["reposition_origin"].astype(int)
         reposition_dest = snapshot["reposition_destination"].astype(int)
         reposition_expense = np.sum(
