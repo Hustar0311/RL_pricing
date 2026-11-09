@@ -138,13 +138,14 @@ if __name__ == '__main__':
     if args.mode == 'all':
         writer = SummaryWriter(store_run_folder + "/" + settings_tag + "_" + hyperp_tag)
 
-    td = np.load(args.data_folder + 'td.npy')
-    tt = np.load(args.data_folder + 'tt.npy')
-    vp = np.load(args.data_folder + 'vp.npy')
-    dd_train = np.load(args.data_folder + 'dd_train.npy')
-    dd_test = np.load(args.data_folder + 'dd_test.npy')
-    permutation = np.load(args.data_folder + 'permutation.npy')
-    permutation2 = np.load(args.data_folder + 'permutation2.npy')
+    #td = np.load(args.data_folder + 'td.npy')
+    td = np.load(os.path.join(args.data_folder, 'td.npy'))
+    tt = np.load(os.path.join(args.data_folder, 'tt.npy'))
+    vp = np.load(os.path.join(args.data_folder, 'vp.npy'))
+    dd_train = np.load(os.path.join(args.data_folder, 'dd_train.npy'))
+    dd_test = np.load(os.path.join(args.data_folder, 'dd_test.npy'))
+    permutation = np.load(os.path.join(args.data_folder, 'permutation.npy'))
+    permutation2 = np.load(os.path.join(args.data_folder, 'permutation2.npy'))
     args.num_zone = td.shape[0]
     T_train = dd_train.shape[0]
     T_test = dd_test.shape[0]

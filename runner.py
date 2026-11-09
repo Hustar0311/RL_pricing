@@ -22,6 +22,11 @@ def train(env, controller, dd_train, T_train, baseline, writer, args):
 
     res = []  # pd.DataFrame(columns = 'epoch', 't', 'policy', 'profit', 'welfare')
 
+    # [新增] 确保 temp_p 在任何情况下都有初始值
+    # dd_train的第二维是区域数量 (num_zone)
+    num_zone = dd_train.shape[1]
+    temp_p = np.ones(num_zone) # 初始化定价乘数为 1.0 (中性定价)
+
     # one day to warm up to obtain the initial active vehicle distribution
     for t in range(max(T_train-1440, 0), T_train):
         # print(t)
@@ -31,9 +36,14 @@ def train(env, controller, dd_train, T_train, baseline, writer, args):
         if t % args.frequency == 0:
             if args.pricing_alg == 'dummy':
                 # no need to train
-                ...
+                #...
+                # FIX: Assign temp_p for dummy case
+                temp_p = controller.dummy_price()
             elif args.pricing_alg == 'equilibrium':
-                ...
+                #...
+                # FIX: Assign temp_p for equilibrium case
+                temp_p = controller.equilibrium_price(np.sum(env.pass_count, axis=(0)), env.active_veh ,
+                                                          [dd_train[(t + i) % T_train, :, :] for i in range(10)], args.data_folder)
             else:
                 temp_p = controller.update_price(env.pass_count, env.veh_count, \
                                              ongoing_veh, env.avg_profit, env.zone_profit,

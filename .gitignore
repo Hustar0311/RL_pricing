@@ -1,5 +1,35 @@
-model
-result
-run
-*.pyc
-*.pyc
+# Python caches
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Experiment outputs
+results/
+runs/
+logs/
+models/
+model/
+audit_outputs/
+comparison_outputs/
+experiment_jobs/
+outputs/
+
+# Model/checkpoint files
+*.pt
+*.pth
+*.pkl
+*.ckpt
+*.onnx
+
+# Generated arrays and reports
+*.npy
+*.npz
+*.csv
+*.log
+
+# TensorBoard
+events.out.tfevents.*
+
+# Versioned upstream reproducibility inputs
+!grid_small_*/4/4/*.npy
