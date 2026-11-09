@@ -1,11 +1,14 @@
 # input: parameters
 # output: trainded model under "train mode", tested results under "test mode"
 from sim import Environment
-from center import Platform
+from center import MAXP, MINP, Platform
 import sys
 import numpy as np
 import argparse
+import json
 import os
+import time
+from datetime import datetime
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from runner import train, test
@@ -16,6 +19,176 @@ from runner import train, test
 # TODO:
 # Add another algorithm for SAR
 
+def tag_float(value):
+    return str(value).replace("-", "m").replace(".", "p")
+
+def normalize_mechanism_flags(args):
+    """Resolve the legacy all-on switch into two explicit mechanism flags."""
+    legacy_all_on = bool(getattr(args, "use_bounded_rationality", False))
+    args.use_passenger_entry_br = bool(
+        getattr(args, "use_passenger_entry_br", False) or legacy_all_on
+    )
+    args.use_driver_online_br = bool(
+        getattr(args, "use_driver_online_br", False) or legacy_all_on
+    )
+    args.use_bounded_rationality = bool(
+        args.use_passenger_entry_br or args.use_driver_online_br
+    )
+    return args
+
+def enabled_mechanisms(args):
+    mechanisms = []
+    if args.use_passenger_entry_br:
+        mechanisms.append("passenger_entry")
+    if args.use_driver_online_br:
+        mechanisms.append("driver_online")
+    return mechanisms
+
+def bounded_rationality_tag(args):
+    if not args.use_bounded_rationality:
+        return ""
+    parts = ["BR"]
+    if args.use_passenger_entry_br:
+        parts.extend([
+            "passenger_entry",
+            "bp{}".format(tag_float(args.beta_passenger)),
+            "pu{}".format(tag_float(args.passenger_base_utility)),
+            "pp{}".format(tag_float(args.passenger_price_sensitivity)),
+            "pw{}".format(tag_float(args.passenger_wait_sensitivity)),
+        ])
+    if args.use_driver_online_br:
+        parts.extend([
+            "driver_online",
+            "bd{}".format(tag_float(args.beta_driver)),
+        ])
+    return "_" + "_".join(parts)
+
+def _read_json_if_exists(path):
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except Exception as exc:
+        print(f"Warning: failed to read {path}: {exc}")
+        return {}
+
+def write_metadata(args, result_folder):
+    model_family = "bounded_rationality" if args.use_bounded_rationality else "baseline"
+    mechanisms = enabled_mechanisms(args)
+    metadata_path = os.path.join(result_folder, "metadata.json")
+    existing_metadata = _read_json_if_exists(metadata_path)
+    existing_runtime = existing_metadata.get("runtime")
+    metadata = {
+        "model_family": model_family,
+        "schema_version": 2,
+        "enabled_mechanisms": mechanisms,
+        "mechanism_flags": {
+            "passenger_entry": bool(args.use_passenger_entry_br),
+            "driver_online": bool(args.use_driver_online_br),
+        },
+        "data_folder": args.data_folder,
+        "pricing_alg": args.pricing_alg,
+        "mode": args.mode,
+        "name": args.name,
+        "seed": args.seed,
+        "n_epochs": args.n_epochs,
+        "min_price_multiplier": MINP,
+        "max_price_multiplier": MAXP,
+        "simulation_parameters": {
+            "alpha0": 2.0,
+            "alpha1": 2.0,
+            "alpha2": 0.1,
+            "beta1": 0.4,
+            "beta2": 0.1,
+            "delta": 0.75,
+        },
+        "bounded_rationality_parameters": {
+            "beta_passenger": args.beta_passenger if args.use_passenger_entry_br else None,
+            "beta_driver": args.beta_driver if args.use_driver_online_br else None,
+            "passenger_base_utility": args.passenger_base_utility if args.use_passenger_entry_br else None,
+            "passenger_price_sensitivity": args.passenger_price_sensitivity if args.use_passenger_entry_br else None,
+            "passenger_wait_sensitivity": args.passenger_wait_sensitivity if args.use_passenger_entry_br else None,
+            "br_random_seed": (
+                args.br_random_seed if args.br_random_seed is not None else args.seed
+            ) if mechanisms else None,
+            "rng_streams": {
+                mechanism: "SeedSequence.spawn({})".format(stream_index)
+                for mechanism, stream_index, is_enabled in [
+                    ("passenger_entry", 0, args.use_passenger_entry_br),
+                    ("driver_online", 1, args.use_driver_online_br),
+                ]
+                if is_enabled
+            } if mechanisms else None,
+        },
+        "process_audit_enabled": bool(args.enable_process_audit),
+        "event_order": [
+            "match_existing_waiting_requests",
+            "apply_configured_passenger_response",
+            "execute_matched_services_and_update_vehicles",
+            "expire_and_enqueue_requests",
+        ],
+    }
+    if existing_runtime is not None:
+        metadata["runtime"] = existing_runtime
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, ensure_ascii=False)
+
+def safe_cuda_synchronize(device):
+    device_text = str(device).lower()
+    if "cuda" not in device_text:
+        return False
+    try:
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            return True
+    except Exception as exc:
+        print(f"Warning: CUDA synchronize failed: {exc}")
+    return False
+
+def build_runtime_info(args, start_time, end_time, start_counter, end_counter, cuda_synchronized):
+    elapsed_seconds = max(0.0, end_counter - start_counter)
+    return {
+        "train_start_time": start_time.replace(microsecond=0).isoformat(),
+        "train_end_time": end_time.replace(microsecond=0).isoformat(),
+        "train_elapsed_seconds": round(elapsed_seconds, 4),
+        "train_elapsed_minutes": round(elapsed_seconds / 60.0, 4),
+        "train_elapsed_hours": round(elapsed_seconds / 3600.0, 4),
+        "avg_epoch_seconds": round(elapsed_seconds / max(int(args.n_epochs) - int(args.resume), 1), 4),
+        "wall_clock_timer": "time.perf_counter",
+        "device": args.device,
+        "cuda_synchronized": bool(cuda_synchronized),
+    }
+
+def update_runtime_metadata(metadata_path, runtime_info):
+    metadata = _read_json_if_exists(metadata_path)
+    metadata["runtime"] = runtime_info
+    with open(metadata_path, "w", encoding="utf-8") as handle:
+        json.dump(metadata, handle, indent=2, ensure_ascii=False)
+
+def write_runtime_summary(result_dir, runtime_info, args):
+    summary = {
+        "data_folder": args.data_folder,
+        "pricing_alg": args.pricing_alg,
+        "mode": args.mode,
+        "name": args.name,
+        "seed": args.seed,
+        "n_epochs": args.n_epochs,
+        "batch_size": args.batch_size,
+        "actor_lr": args.actor_lr,
+        "critic_lr": args.critic_lr,
+        "device": args.device,
+        "use_bounded_rationality": bool(args.use_bounded_rationality),
+        "use_passenger_entry_br": bool(args.use_passenger_entry_br),
+        "use_driver_online_br": bool(args.use_driver_online_br),
+        "enabled_mechanisms": enabled_mechanisms(args),
+        "beta_passenger": args.beta_passenger if args.use_passenger_entry_br else None,
+        "beta_driver": args.beta_driver if args.use_driver_online_br else None,
+        **runtime_info,
+    }
+    with open(os.path.join(result_dir, "runtime_summary.json"), "w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, ensure_ascii=False)
+
 def get_arguments(argv):
     parser = argparse.ArgumentParser(description='SpatioTemporal Pricing')
     # Simulation settings
@@ -24,7 +197,7 @@ def get_arguments(argv):
     parser.add_argument('-v', '--verbose', action='store_true', default=False,
                         help='show info messages')
     parser.add_argument('-m', '--mode', type=str, default='all',
-                        help='running mode, test or all which means include both train and test. (DEFAULT: all)')
+                        help='running mode, train/all for training or test for testing. (DEFAULT: all)')
     parser.add_argument('-n', '--name', type=str, default='0', help='name_of the run')
     parser.add_argument('-rs', '--seed', type=int, default=47, help='random seed')
     # Training settings
@@ -65,7 +238,31 @@ def get_arguments(argv):
                         help='whether to use forget in the critic network')
     parser.add_argument('-pm', '--pricing_mode', action='store_true', default=False,
                         help='demand sensitivity to price, either inverse or linear')
-    args = parser.parse_args(argv)
+    parser.add_argument('--use_bounded_rationality', action='store_true', default=False,
+                        help='legacy compatibility switch: enable both passenger-entry and driver-online BR mechanisms')
+    parser.add_argument('--use_passenger_entry_br', action='store_true', default=False,
+                        help='enable only the passenger-entry bounded-rationality mechanism')
+    parser.add_argument('--use_driver_online_br', action='store_true', default=False,
+                        help='enable only the driver online/active-supply bounded-rationality mechanism')
+    parser.add_argument('--beta_passenger', '--beta_c', dest='beta_passenger', type=float, default=1.0,
+                        help='passenger bounded rationality scale; smaller values approach deterministic utility choice')
+    parser.add_argument('--beta_driver', '--beta_a', dest='beta_driver', type=float, default=1.0,
+                        help='driver bounded rationality scale for online/active decisions')
+    parser.add_argument('--passenger_base_utility', '--passenger_value', dest='passenger_base_utility',
+                        type=float, default=2.0, help='baseline passenger service utility in the entry logit')
+    parser.add_argument('--passenger_price_sensitivity', type=float, default=1.0,
+                        help='price coefficient in the passenger entry utility')
+    parser.add_argument('--passenger_wait_sensitivity', type=float, default=0.1,
+                        help='congestion coefficient in the passenger entry utility')
+    parser.add_argument('--br_random_seed', type=int, default=None,
+                        help='random seed for bounded rationality choices; defaults to --seed')
+    parser.add_argument('--disable_process_audit', dest='enable_process_audit', action='store_false', default=True,
+                        help='disable step/zone audit logs and sampled snapshots generated during test runs')
+    parser.add_argument('--audit_sample_seed', type=int, default=2026,
+                        help='fixed seed for selecting random process-audit snapshot steps')
+    parser.add_argument('--audit_random_sample_count', type=int, default=7,
+                        help='number of randomly selected process-audit snapshot steps per test log')
+    args = normalize_mechanism_flags(parser.parse_args(argv))
 
     return args
 
@@ -74,6 +271,7 @@ if __name__ == '__main__':
 
     # loading arguments
     args = get_arguments(sys.argv[1:])
+    is_train_mode = args.mode in ['all', 'train']
 
     torch.manual_seed(args.seed)
     if args.device == 'cuda':
@@ -88,6 +286,7 @@ if __name__ == '__main__':
     scenario_tag = args.data_folder.replace("/", "_")
     settings_tag = args.pricing_alg + permutation_tag + constraint_tag + auto_tag + forget_tag + "_" +args.searching + "_" +\
                    str(args.policy_delay) +"_"+str(args.position_encode) + "_" + args.name
+    settings_tag += bounded_rationality_tag(args)
     hyperp_tag = str(args.batch_size) + "_" + str(args.actor_lr) + "_" + str(args.critic_lr) + "_" + str(args.kernel_size)
 
     # prepare the folders for storing the results
@@ -117,7 +316,7 @@ if __name__ == '__main__':
     args.store_model_folder = store_model_folder
     args.store_res_folder = store_res_folder
 
-    if args.mode == 'all' and (os.path.exists(args.store_res_folder+"/"+"train_log_"+str(args.n_epochs)+".csv")):
+    if is_train_mode and (os.path.exists(args.store_res_folder+"/"+"train_log_"+str(args.n_epochs)+".csv")):
         print("Files are already there, exit!")
         sys.exit()
 
@@ -129,13 +328,16 @@ if __name__ == '__main__':
         print("Files are already there, exit!")
         sys.exit()
 
+
+    write_metadata(args, args.store_res_folder)
+
     # load data
     if args.verbose:
         print("Loading data")
 
     # time_tag = datetime.datetime.now().strftime("%m-%d-%H-%M")
     writer = None
-    if args.mode == 'all':
+    if is_train_mode:
         writer = SummaryWriter(store_run_folder + "/" + settings_tag + "_" + hyperp_tag)
 
     #td = np.load(args.data_folder + 'td.npy')
@@ -230,11 +432,11 @@ if __name__ == '__main__':
                               T_train = T_train
                               )
 
-    env = Environment(td, tt, vp, args.num_zone, frequency=args.frequency)
+    env = Environment(td, tt, vp, args.num_zone, frequency=args.frequency, br_config=args)
 
     # input: travel distance, travel time matrices, initial vehicle distribution
     # output: time step, profit, reposition cost
-    if args.mode == 'all':
+    if is_train_mode:
         if args.resume > 0:
             if args.verbose:
                 print("Load model")
@@ -252,7 +454,24 @@ if __name__ == '__main__':
         baseline = (1 - env.delta) * (env.alpha0 * np.sum(dd_train, axis=(1, 2)) + env.alpha1 * np.sum(
             dd_train * td[None, :, :], axis=(1, 2)) + \
                    env.beta1 * np.sum(dd_train * tt[None, :, :], axis=(1, 2)))
+        start_sync = safe_cuda_synchronize(args.device)
+        train_start_time = datetime.now()
+        train_start_counter = time.perf_counter()
+        args.train_timer_start = train_start_counter
         train(env, controller, dd_train, T_train, baseline, writer, args)
+        end_sync = safe_cuda_synchronize(args.device)
+        train_end_counter = time.perf_counter()
+        train_end_time = datetime.now()
+        runtime_info = build_runtime_info(
+            args,
+            train_start_time,
+            train_end_time,
+            train_start_counter,
+            train_end_counter,
+            start_sync and end_sync,
+        )
+        update_runtime_metadata(os.path.join(args.store_res_folder, "metadata.json"), runtime_info)
+        write_runtime_summary(args.store_res_folder, runtime_info, args)
         # test(env, controller, dd_train, dd_test, T_test, args, 0)
     else:
         # load the model
@@ -276,8 +495,9 @@ if __name__ == '__main__':
             if args.device == 'cuda':
                 controller.pricer.cuda()
         # run exp
-        for k in range(1, 6):
+        test_repeats = range(1, 6)
+        for k in test_repeats:
             test(env, controller, dd_train, dd_test, T_test, args, k)
     # collect result
-    if args.mode == 'all':
+    if is_train_mode:
         writer.close()

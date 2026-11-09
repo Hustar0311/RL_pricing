@@ -1,0 +1,18 @@
+{
+  "model_family": "bounded_rationality",
+  "schema_version": 2,
+  "supported_mechanisms": [
+    "passenger_entry",
+    "driver_online"
+  ],
+  "enabled_mechanisms": [
+    "passenger_entry",
+    "driver_online"
+  ],
+  "mechanism_switches": {
+    "passenger_entry": "--use_passenger_entry_br",
+    "driver_online": "--use_driver_online_br",
+    "legacy_all_on": "--use_bounded_rationality"
+  },
+  "note": "Run-specific metadata.json files record the actual enabled mechanism subset in each result leaf directory."
+}
