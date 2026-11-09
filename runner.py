@@ -4,6 +4,7 @@ import torch
 import os
 import time
 
+from visual_trace import TraceRecorder
 from process_audit import ProcessAuditRecorder
 
 def price_sensitivity(pricing_multipliers, mode = False):
@@ -267,9 +268,10 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
     if args.verbose:
         print("Start testing")
     res = []
+    trace_recorder = None
     audit_recorder = None
     test_log_path = args.store_res_folder + "/" + f"test_log_{k}.csv"
-    write_test_outputs = True
+    write_test_outputs = (not getattr(args, "trace_only", False)) or (not os.path.exists(test_log_path))
     if getattr(args, "enable_process_audit", True) and write_test_outputs:
         audit_recorder = ProcessAuditRecorder(
             args.store_res_folder,
@@ -277,6 +279,38 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
             T_test,
             random_sample_count=getattr(args, "audit_random_sample_count", 7),
             sample_seed=getattr(args, "audit_sample_seed", 2026),
+        )
+    trace_test_k = int(getattr(args, "trace_test_k", 1))
+    if getattr(args, "enable_visual_trace", False) and (trace_test_k <= 0 or k == trace_test_k):
+        trace_dir = getattr(args, "trace_dir", None)
+        if not trace_dir:
+            trace_dir = os.path.join(args.store_res_folder, "visual_trace", f"test_log_{k}")
+        metadata = {
+            "data_folder": args.data_folder,
+            "pricing_alg": args.pricing_alg,
+            "name": args.name,
+            "seed": args.seed,
+            "n_epochs": args.n_epochs,
+            "test_log": f"test_log_{k}.csv",
+            "store_res_folder": args.store_res_folder,
+            "num_zone": args.num_zone,
+            "frequency": args.frequency,
+            "use_bounded_rationality": bool(args.use_bounded_rationality),
+            "use_passenger_entry_br": bool(args.use_passenger_entry_br),
+            "use_driver_online_br": bool(args.use_driver_online_br),
+            "enabled_mechanisms": [
+                mechanism for mechanism, enabled in [
+                    ("passenger_entry", args.use_passenger_entry_br),
+                    ("driver_online", args.use_driver_online_br),
+                ] if enabled
+            ],
+            "model_family": "bounded_rationality" if args.use_bounded_rationality else "baseline",
+            "schema_version": 2,
+        }
+        trace_recorder = TraceRecorder(
+            trace_dir,
+            metadata=metadata,
+            trace_interval=getattr(args, "trace_interval", 1),
         )
     controller.pricer.eval()
     total_time_step = 0
@@ -365,6 +399,8 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
         # writer.add_scalar("Served_passenger/test", temp_served_pass, t)
         # writer.add_scalar("Left_passenger/test", temp_left_pass, t)
 
+        if trace_recorder is not None:
+            trace_recorder.record_step(t, temp_p, step_metrics, env)
         if audit_recorder is not None:
             audit_recorder.record_step(t, temp_p, step_metrics, env)
 
@@ -397,6 +433,8 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
     )
     if write_test_outputs:
         res.to_csv(test_log_path, index=None)
+    if trace_recorder is not None:
+        trace_recorder.close()
     if audit_recorder is not None:
         audit_recorder.close()
     env.reset()

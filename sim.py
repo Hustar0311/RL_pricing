@@ -81,6 +81,8 @@ class Environment:
         self._pending_passenger_audit = None
         self.last_step_stats = self._empty_step_stats()
         self.last_step_audit = {}
+        self._next_trace_order_id = 0
+        self.last_step_trace = self._empty_step_trace()
 
     def _empty_step_stats(self):
         return {
@@ -99,6 +101,11 @@ class Environment:
             "driver_online_decision_variance": 0.0,
         }
 
+    def _empty_step_trace(self):
+        return {
+            "order_events": [],
+            "vehicle_events": [],
+        }
 
     def _sigmoid_probability(self, utility, beta):
         utility = np.asarray(utility, dtype=float)
@@ -161,6 +168,11 @@ class Environment:
     def get_last_step_stats(self):
         return dict(self.last_step_stats)
 
+    def get_last_step_trace(self):
+        return {
+            "order_events": list(self.last_step_trace.get("order_events", [])),
+            "vehicle_events": list(self.last_step_trace.get("vehicle_events", [])),
+        }
 
     def get_last_step_audit(self):
         audit = {}
@@ -245,6 +257,8 @@ class Environment:
         service_passenger_origins = []
         service_destinations = []
         service_wait_indices = []
+        order_events = []
+        vehicle_events = []
 
         # time step t
         for v_loc, p_loc in veh_schedule:
@@ -260,22 +274,53 @@ class Environment:
             assert self.veh_count[v_loc] > 0 and p_loc2 != -1, print(
                 "Error" + "," + str(np.sum(self.pass_count, axis=(0, 2))) + "," + str(p_loc) + "," + str(v_loc))
             matched_order_count += 1
+            order_id = self._next_trace_order_id
+            self._next_trace_order_id += 1
             served_pass += 1
             matched_matrix[p_loc, p_loc2] += 1
             v = self.veh_queue[v_loc].popleft()
+            pickup_time = float(self.travel_time[v_loc, p_loc])
+            trip_time = float(self.travel_time[p_loc, p_loc2])
             v.loc = p_loc2
             v.remaining_time = self.travel_time[v_loc, p_loc] + self.travel_time[p_loc, p_loc2]
             v.state = 1
             v.waiting = 0
+            v.trace_from_zone = v_loc
+            v.trace_to_zone = p_loc2
+            v.trace_total_time = v.remaining_time
             v.trace_movement_type = "service"
             self.veh_count[v_loc] -= 1
             # price calculation function is here
             tmp_payment = self.pricing_multipliers[j, p_loc] * (self.alpha0 + self.alpha1 * self.travel_distance[p_loc, p_loc2] + \
                                                      self.beta1 * self.travel_time[p_loc, p_loc2])
+            order_events.append({
+                "order_id": int(order_id),
+                "vehicle_id": int(v.id),
+                "event_type": "served",
+                "vehicle_origin": int(v_loc),
+                "passenger_origin": int(p_loc),
+                "passenger_dest": int(p_loc2),
+                "wait_index": int(j),
+                "price_multiplier": float(self.pricing_multipliers[j, p_loc]),
+                "fare": float(tmp_payment),
+                "pickup_time": pickup_time,
+                "trip_time": trip_time,
+                "duration": float(v.remaining_time),
+            })
             service_vehicle_origins.append(int(v_loc))
             service_passenger_origins.append(int(p_loc))
             service_destinations.append(int(p_loc2))
             service_wait_indices.append(int(j))
+            vehicle_events.append({
+                "vehicle_id": int(v.id),
+                "event_type": "service",
+                "from_zone": int(v_loc),
+                "pickup_zone": int(p_loc),
+                "to_zone": int(p_loc2),
+                "pickup_time": pickup_time,
+                "trip_time": trip_time,
+                "duration": float(v.remaining_time),
+            })
             tot_profit += tmp_payment
             # for the pickup trip, the platform pays drivers according to the empty trip wage
             tot_expense[v.loc] += self.alpha2 * self.travel_distance[v_loc, p_loc] + self.beta2 * self.travel_time[v_loc, p_loc] + \
@@ -333,9 +378,17 @@ class Environment:
                 if v.remaining_time <= 0:
                     # v arrival
                     v.state = 0
+                    v.trace_from_zone = v.loc
+                    v.trace_to_zone = v.loc
+                    v.trace_total_time = 0
                     v.trace_movement_type = "idle"
                     self.veh_count[v.loc] += 1
                     self.veh_queue[v.loc].append(v)
+                    vehicle_events.append({
+                        "vehicle_id": int(v.id),
+                        "event_type": "arrive_available",
+                        "zone": int(v.loc),
+                    })
             ## vehicles quit/reposition/rejoin
             elif v.state == 0:
                 if self.use_driver_online_br:
@@ -349,10 +402,18 @@ class Environment:
                 if not stays_online:
                     old_loc = v.loc
                     v.state = 2
+                    v.trace_from_zone = old_loc
+                    v.trace_to_zone = old_loc
+                    v.trace_total_time = 0
                     v.trace_movement_type = "offline"
                     self.veh_count[v.loc] -= 1
                     self.veh_queue[v.loc].remove(v)
                     self.active_veh -= 1
+                    vehicle_events.append({
+                        "vehicle_id": int(v.id),
+                        "event_type": "offline",
+                        "zone": int(old_loc),
+                    })
                 else:
                     if len(self.rand_double) == 0:
                         self.rand_double = list(np.random.random(size=100000))
@@ -370,9 +431,19 @@ class Environment:
                         v.state = 1
                         v.loc = new_loc
                         v.remaining_time = remaining_time
+                        v.trace_from_zone = old_loc
+                        v.trace_to_zone = new_loc
+                        v.trace_total_time = remaining_time
                         v.trace_movement_type = "reposition"
                         reposition_origins.append(int(old_loc))
                         reposition_destinations.append(int(new_loc))
+                        vehicle_events.append({
+                            "vehicle_id": int(v.id),
+                            "event_type": "reposition",
+                            "from_zone": int(old_loc),
+                            "to_zone": int(new_loc),
+                            "duration": float(remaining_time),
+                        })
             elif v.state == 2:
                 if self.use_driver_online_br:
                     online_probability = self.driver_online_probability(v.profile)
@@ -386,12 +457,20 @@ class Environment:
                     v.state = 0
                     v.waiting = 0
                     v.loc = self.rand_int.pop()
+                    v.trace_from_zone = v.loc
+                    v.trace_to_zone = v.loc
+                    v.trace_total_time = 0
                     v.trace_movement_type = "online"
                     if len(self.rand_int) == 0:
                         self.rand_int = list(np.random.randint(0, self.num_zone, size = 100000))
                     self.veh_count[v.loc] += 1
                     self.veh_queue[v.loc].append(v)
                     self.active_veh += 1
+                    vehicle_events.append({
+                        "vehicle_id": int(v.id),
+                        "event_type": "online",
+                        "zone": int(v.loc),
+                    })
 
         # generate_pass
         left_by_origin = np.sum(self.pass_count[-1, :, :], axis=1).astype(int)
@@ -476,6 +555,10 @@ class Environment:
             "cruising_expense": cruising_expense,
             "reposition_expense": reposition_expense,
         }
+        self.last_step_trace = {
+            "order_events": order_events,
+            "vehicle_events": vehicle_events,
+        }
 
         return tot_profit, tot_expense, served_pass, left_pass, occu_mile, occu_minute, empty_mile, empty_minute
 
@@ -494,6 +577,8 @@ class Environment:
         self._pending_passenger_audit = None
         self.last_step_stats = self._empty_step_stats()
         self.last_step_audit = {}
+        self.last_step_trace = self._empty_step_trace()
+        self._next_trace_order_id = 0
         self.initialize_veh()
 
 
@@ -505,6 +590,9 @@ class Vehicle:
         self.remaining_time = 0
         self.state = 0  # 0 for waiting in a zone, 1 for ongoing, 2 for rest
         self.waiting = 0
+        self.trace_from_zone = zone_id
+        self.trace_to_zone = zone_id
+        self.trace_total_time = 0
         self.trace_movement_type = "idle"
 
     def reposition(self, travel_time, prob, repos_dest):

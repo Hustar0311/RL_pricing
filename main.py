@@ -262,6 +262,16 @@ def get_arguments(argv):
                         help='fixed seed for selecting random process-audit snapshot steps')
     parser.add_argument('--audit_random_sample_count', type=int, default=7,
                         help='number of randomly selected process-audit snapshot steps per test log')
+    parser.add_argument('--enable_visual_trace', action='store_true', default=False,
+                        help='export per-step vehicle/order trace files during test mode')
+    parser.add_argument('--trace_dir', type=str, default=None,
+                        help='directory for visual trace output; defaults under the selected test result folder')
+    parser.add_argument('--trace_test_k', type=int, default=1,
+                        help='which test repeat to trace; use 0 to trace all repeats')
+    parser.add_argument('--trace_interval', type=int, default=1,
+                        help='record one visual trace frame every N simulation steps')
+    parser.add_argument('--trace_only', action='store_true', default=False,
+                        help='when existing test logs are present, rerun only the traced test without overwriting logs')
     args = normalize_mechanism_flags(parser.parse_args(argv))
 
     return args
@@ -324,10 +334,13 @@ if __name__ == '__main__':
         print("No trained model can be found, exit!")
         sys.exit()
 
-    if (args.mode == 'test') and os.path.exists(args.store_res_folder+"/"+"test_log_1.csv"):
+    if (args.mode == 'test') and os.path.exists(args.store_res_folder+"/"+"test_log_1.csv") and (not args.enable_visual_trace):
         print("Files are already there, exit!")
         sys.exit()
 
+    if (args.mode == 'test') and os.path.exists(args.store_res_folder+"/"+"test_log_1.csv") and args.enable_visual_trace and (not args.trace_only):
+        print("Test logs are already there. Use --trace_only with --enable_visual_trace to generate trace without overwriting logs.")
+        sys.exit()
 
     write_metadata(args, args.store_res_folder)
 
@@ -496,6 +509,8 @@ if __name__ == '__main__':
                 controller.pricer.cuda()
         # run exp
         test_repeats = range(1, 6)
+        if args.enable_visual_trace and args.trace_only and args.trace_test_k > 0:
+            test_repeats = [args.trace_test_k]
         for k in test_repeats:
             test(env, controller, dd_train, dd_test, T_test, args, k)
     # collect result
