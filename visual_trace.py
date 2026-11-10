@@ -34,6 +34,7 @@ class TraceRecorder:
             "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
             "trace_interval": self.trace_interval,
             "metadata": metadata or {},
+            "action_space": (metadata or {}).get("action_space"),
             "files": {
                 "steps": "steps.jsonl",
                 "vehicle_snapshots": "vehicle_snapshots.jsonl",
@@ -59,7 +60,7 @@ class TraceRecorder:
     def _write_jsonl(self, handle, value):
         handle.write(json.dumps(_jsonable(value), separators=(",", ":")) + "\n")
 
-    def record_step(self, t, policy, metrics, env):
+    def record_step(self, t, policy, metrics, env, compensation_policy=None):
         if int(t) % self.trace_interval != 0:
             return
 
@@ -68,10 +69,13 @@ class TraceRecorder:
         waiting_by_origin = np.sum(env.pass_count, axis=(0, 2))
         waiting_by_od = np.sum(env.pass_count, axis=0)
         ongoing_veh_count = env.get_ongoing_veh()
+        if compensation_policy is None:
+            compensation_policy = env.get_last_step_audit().get("compensation_vector", policy)
 
         self._write_jsonl(self.steps, {
             "t": int(t),
             "policy": np.asarray(policy, dtype=float),
+            "compensation_policy": np.asarray(compensation_policy, dtype=float),
             "metrics": metrics,
             "bounded_rationality": step_stats,
             "vehicle_count": np.asarray(env.veh_count, dtype=int),

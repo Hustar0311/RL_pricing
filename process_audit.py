@@ -55,6 +55,7 @@ class ProcessAuditRecorder:
         audit.update(stats)
         audit.update(metrics)
         policy = np.asarray(policy, dtype=float)
+        compensation = np.asarray(audit.get("compensation_vector", policy), dtype=float)
 
         waiting_before = float(np.sum(audit["waiting_request_tensor_before"]))
         waiting_after = float(np.sum(audit["waiting_request_tensor_after"]))
@@ -105,6 +106,12 @@ class ProcessAuditRecorder:
             "driver_online_decision_variance": float(stats["driver_online_decision_variance"]),
         }
         self.step_rows.append(row)
+        row.update(compensation_mean=float(compensation.mean()), compensation_min=float(compensation.min()),
+                   compensation_max=float(compensation.max()))
+        for key in ["driver_payment_total", "pickup_cost_total", "negative_margin_order_count",
+                    "negative_margin_total", "driver_income_basis", "driver_income_denominator"]:
+            if key in audit:
+                row[key] = float(audit[key])
 
         potential_from = np.sum(audit["potential_demand_matrix"], axis=1)
         actual_from = np.sum(audit["actual_demand_matrix"], axis=1)
@@ -116,6 +123,8 @@ class ProcessAuditRecorder:
                 "step": int(t),
                 "zone_id": int(zone),
                 "price_multiplier": float(policy[zone]),
+                "compensation_multiplier": float(compensation[zone]),
+                "driver_payment_from_zone": float(audit.get("driver_payment_by_origin", np.zeros(len(policy)))[zone]),
                 "waiting_by_origin": float(audit["waiting_by_origin"][zone]),
                 "idle_supply": float(audit["idle_supply"][zone]),
                 "active_vehicle_count": float(audit["active_vehicle_vector"][zone]),
