@@ -1,5 +1,6 @@
 from collections import deque
 import numpy as np
+from economic_action import validate_control
 
 class Environment:
     def __init__(self, travel_distance, travel_time, veh_profile, num_zone, max_waiting=5, frequency=1, br_config=None):
@@ -11,6 +12,8 @@ class Environment:
         self.max_waiting = max_waiting
         self.frequency = frequency
         self.pricing_multipliers = np.ones((max_waiting, num_zone))
+        self.compensation_multipliers = self.pricing_multipliers.copy()
+        self.action_mode = getattr(br_config, "action_mode", "price_only")
 
         # parameters, alpha2 and beta2 selected based on the min wage of ridehailing drivers
         # https://www.engadget.com/nyc-gig-drivers-pay-increase-012304976.html
@@ -235,15 +238,26 @@ class Environment:
                 ongoing_veh_count[min(max_step - 1, int(v.remaining_time) // self.frequency), v.loc] += 1
         return ongoing_veh_count
 
-    def step(self, new_demand, veh_schedule, price_multiplier):
+    def step(self, new_demand, veh_schedule, price_multiplier, compensation_multiplier=None):
+        price_multiplier = validate_control(price_multiplier, self.num_zone, "price")
+        compensation_multiplier = validate_control(
+            price_multiplier if compensation_multiplier is None else compensation_multiplier,
+            self.num_zone, "compensation")
         #### at time t
         # dispatch_veh
         waiting_request_tensor_before = self.pass_count.copy()
         pricing_history_before = self.pricing_multipliers.copy()
+        compensation_history_before = self.compensation_multipliers.copy()
         idle_supply_before = self.veh_count.copy()
         active_vehicle_before = self._active_vehicle_by_zone()
         vehicle_state_before, vehicle_zone_before = self._vehicle_vectors()
         tot_profit = 0
+        compensation_basis_total = 0.0
+        driver_payment_total = 0.0
+        pickup_cost_total = 0.0
+        negative_margin_order_count = 0
+        negative_margin_total = 0.0
+        driver_payment_by_origin = np.zeros(self.num_zone)
         tot_expense = np.zeros(self.num_zone)
         tot_count = np.zeros(self.num_zone)
         occu_mile = 0
@@ -291,8 +305,20 @@ class Environment:
             v.trace_movement_type = "service"
             self.veh_count[v_loc] -= 1
             # price calculation function is here
-            tmp_payment = self.pricing_multipliers[j, p_loc] * (self.alpha0 + self.alpha1 * self.travel_distance[p_loc, p_loc2] + \
-                                                     self.beta1 * self.travel_time[p_loc, p_loc2])
+            base_fare = (self.alpha0 + self.alpha1 * self.travel_distance[p_loc, p_loc2]
+                         + self.beta1 * self.travel_time[p_loc, p_loc2])
+            tmp_payment = self.pricing_multipliers[j, p_loc] * base_fare
+            compensation_basis = self.compensation_multipliers[j, p_loc] * base_fare
+            driver_payment = self.delta * compensation_basis
+            pickup_cost = (self.alpha2 * self.travel_distance[v_loc, p_loc]
+                           + self.beta2 * self.travel_time[v_loc, p_loc])
+            order_margin = tmp_payment - driver_payment - pickup_cost
+            compensation_basis_total += compensation_basis
+            driver_payment_total += driver_payment
+            driver_payment_by_origin[p_loc] += driver_payment
+            pickup_cost_total += pickup_cost
+            negative_margin_order_count += int(order_margin < 0)
+            negative_margin_total += max(-order_margin, 0.0)
             order_events.append({
                 "order_id": int(order_id),
                 "vehicle_id": int(v.id),
@@ -303,6 +329,11 @@ class Environment:
                 "wait_index": int(j),
                 "price_multiplier": float(self.pricing_multipliers[j, p_loc]),
                 "fare": float(tmp_payment),
+                "compensation_multiplier": float(self.compensation_multipliers[j, p_loc]),
+                "base_fare": float(base_fare),
+                "driver_order_payment": float(driver_payment),
+                "pickup_cost": float(pickup_cost),
+                "order_margin": float(order_margin),
                 "pickup_time": pickup_time,
                 "trip_time": trip_time,
                 "duration": float(v.remaining_time),
@@ -323,8 +354,7 @@ class Environment:
             })
             tot_profit += tmp_payment
             # for the pickup trip, the platform pays drivers according to the empty trip wage
-            tot_expense[v.loc] += self.alpha2 * self.travel_distance[v_loc, p_loc] + self.beta2 * self.travel_time[v_loc, p_loc] + \
-                           self.delta * tmp_payment
+            tot_expense[v.loc] += pickup_cost + driver_payment
 
             occu_mile += self.travel_distance[p_loc, p_loc2]
             occu_minute += self.travel_time[p_loc, p_loc2]
@@ -334,7 +364,8 @@ class Environment:
         # update total and zone profit
         self.avg_profit -= self.avg_profits[0] / 30
         self.avg_profits[:-1] = self.avg_profits[1:]
-        self.avg_profits[-1] = tot_profit / (np.sum(self.veh_count) + served_pass + 1e-4) # current available vehicles
+        income_basis = compensation_basis_total if self.action_mode == "joint" else tot_profit
+        self.avg_profits[-1] = income_basis / (np.sum(self.veh_count) + served_pass + 1e-4)
         self.avg_profit += self.avg_profits[-1] / 30
         self.zone_profit -= self.zone_profits[0, :] / 30
         self.zone_profits[:-1, :] = self.zone_profits[1:, :]
@@ -363,6 +394,8 @@ class Environment:
         # update price_multiplier
         self.pricing_multipliers[1:self.max_waiting, :] = self.pricing_multipliers[0:(self.max_waiting - 1), :]
         self.pricing_multipliers[0, :] = price_multiplier
+        self.compensation_multipliers[1:, :] = self.compensation_multipliers[:-1, :].copy()
+        self.compensation_multipliers[0, :] = compensation_multiplier
 
         #### between time t and t+1
         # update_veh
@@ -524,6 +557,14 @@ class Environment:
             "driver_online_br_enabled": bool(self.use_driver_online_br),
             "price_vector": np.asarray(price_multiplier, dtype=float).copy(),
             "pricing_history_before": pricing_history_before,
+            "compensation_history_before": compensation_history_before,
+            "compensation_vector": compensation_multiplier.copy(),
+            "driver_payment_total": float(driver_payment_total),
+            "driver_payment_by_origin": driver_payment_by_origin,
+            "pickup_cost_total": float(pickup_cost_total),
+            "negative_margin_order_count": int(negative_margin_order_count),
+            "negative_margin_total": float(negative_margin_total),
+            "driver_income_basis": float(income_basis),
             "waiting_request_tensor_before": waiting_request_tensor_before,
             "waiting_request_tensor_after": self.pass_count.copy(),
             "idle_supply_vector": idle_supply_before,
@@ -564,6 +605,9 @@ class Environment:
 
     def reset(self):
         self.pass_count *= 0
+        # No queued orders survive reset. Match the legacy price-history reset
+        # convention, and start compensation history tied to that same history.
+        self.compensation_multipliers = self.pricing_multipliers.copy()
         self.veh_count *= 0
         self.veh_queue = [deque() for i in range(self.num_zone)]  # queue for waiting vehicles
         self.veh_list = []  # list of all vehicles
