@@ -57,6 +57,8 @@ class Pricer:
 
     def random_action(self):
         action = torch.rand((1,self.n_action))
+        if getattr(self, "joint", False):
+            action = action * 2 - 1
         return action
 
     def load_weights(self, output, epoch):
@@ -127,24 +129,37 @@ class TD3(Pricer):
 
     def update_policy(self, batch_size, memory, iter, update_freq=1):
         # Sample batch
-        state_batch, state2d_batch, action_batch, reward_batch, next_state_batch, next_state2d_batch, t_batch = memory.sample(batch_size)
+        batch = memory.sample(batch_size)
+        if self.joint:
+            state_batch, state2d_batch, action_batch, reward_batch, next_state_batch, next_state2d_batch, t_batch, next_t, terminal = batch
+            iter = self.critic_updates
+        else:
+            state_batch, state2d_batch, action_batch, reward_batch, next_state_batch, next_state2d_batch, t_batch = batch
+            next_t, terminal = t_batch + 1, 0.0
 
         with torch.no_grad():
             # noise = (torch.randn_like(action_batch) * self.policy_noise).clamp(-self.noise_clip, self.noise_clip)
-            next_action = self.actor_target(next_state_batch, next_state2d_batch, t_batch + 1)# (self.actor_target(next_state_batch, next_state2d_batch, t_batch + 1) + noise).clamp(-self.max_action, self.max_action)
+            next_action = self.actor_target(next_state_batch, next_state2d_batch, next_t)
             # Prepare for the target q batch
-            target_Q1, target_Q2 = self.critic_target(next_state_batch, next_state2d_batch, next_action, t_batch + 1)
-            target_q_batch = reward_batch + GAMMA * torch.minimum(target_Q1, target_Q2) # (t_batch<10079)*next_q_values
+            target_Q1, target_Q2 = self.critic_target(next_state_batch, next_state2d_batch, next_action, next_t)
+            target_q_batch = reward_batch + GAMMA * (1.0 - terminal) * torch.minimum(target_Q1, target_Q2)
 
         # Critic updates
         current_Q1, current_Q2 = self.critic(state_batch, state2d_batch, action_batch, t_batch)
         value_loss = 1/2 * (criterion(current_Q1, target_q_batch) + criterion(current_Q2, target_q_batch))
         value_loss = value_loss.mean()
-        self.writer.add_scalar("TD3_loss/value_loss", value_loss, iter)
+        if not torch.isfinite(value_loss):
+            raise FloatingPointError("non-finite TD3 critic loss")
+        if self.writer is not None:
+            self.writer.add_scalar("TD3_loss/value_loss", value_loss, iter)
         self.critic.zero_grad()
         value_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), MAX_GRAD_NORM_CRITIC)
+        critic_norm = torch.nn.utils.clip_grad_norm_(self.critic.parameters(), MAX_GRAD_NORM_CRITIC)
+        if not torch.isfinite(critic_norm):
+            raise FloatingPointError("non-finite TD3 critic gradient")
         self.critic_optim.step()
+        self.critic_updates += 1
+        self.last_metrics = {"value_loss": float(value_loss.detach()), "critic_gradient_norm": float(critic_norm)}
         # Q target update
         self.soft_update(self.critic, self.critic_target)
         # Delay policy updates
@@ -159,11 +174,17 @@ class TD3(Pricer):
             # print(policy_loss)
             policy_loss = policy_loss.mean()
             # print(policy_loss)
-            self.writer.add_scalar("TD3_loss/policy_loss", policy_loss, iter)
+            if not torch.isfinite(policy_loss):
+                raise FloatingPointError("non-finite TD3 actor loss")
+            if self.writer is not None:
+                self.writer.add_scalar("TD3_loss/policy_loss", policy_loss, iter)
             self.actor.zero_grad()
             policy_loss.backward()
-            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), MAX_GRAD_NORM_ACTOR)
+            actor_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), MAX_GRAD_NORM_ACTOR)
+            if not torch.isfinite(actor_norm):
+                raise FloatingPointError("non-finite TD3 actor gradient")
             self.actor_optim.step()
+            self.last_metrics.update(policy_loss=float(policy_loss.detach()), actor_gradient_norm=float(actor_norm))
             self.update_time += 1
             self.policy_freq = iter + self.next_udpate_step(self.update_time) * update_freq
             # policy target update, directly copy, meanwhile forget the top layer of the Q-network
@@ -187,15 +208,18 @@ class TD3(Pricer):
 
 class TD3_MLP(TD3):
     def __init__(self, num_zone, max_waiting, max_duration, max_traveling, actor_lr = 0.0001, critic_lr = 0.001, writer = None, policy_delay = 30,
-                 position_encode = 32, forget = False, max_len = 10080):
+                 position_encode = 32, forget = False, max_len = 10080, action_mode="price_only"):
         
-        self.n_action = num_zone
-        self.actor = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, num_zone], n = position_encode, max_len=max_len)
-        self.actor_target = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, num_zone], n = position_encode, max_len=max_len)
+        self.joint = action_mode == "joint"
+        self.critic_updates, self.last_metrics = 0, {}
+        self.n_action = num_zone * (2 if self.joint else 1)
+        extra = num_zone * max_duration if self.joint else 0
+        self.actor = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint)
+        self.actor_target = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint)
         self.actor_optim = Adam(self.actor.parameters(), lr=actor_lr)
 
-        self.critic = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, 1], n = position_encode, max_len=max_len)
-        self.critic_target = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128,  128, 1], n = position_encode, max_len=max_len)
+        self.critic = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, 1], n=position_encode, max_len=max_len, extra_state_dim=extra, action_dim=self.n_action)
+        self.critic_target = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, 1], n=position_encode, max_len=max_len, extra_state_dim=extra, action_dim=self.n_action)
         self.critic_optim = Adam(self.critic.parameters(), lr=critic_lr)
 
         self.writer = writer
@@ -218,34 +242,37 @@ class TD3_MLP(TD3):
 
 class TD3_CNN_deep(TD3):
     def __init__(self, num_zone, max_duration, max_traveling, total_channel, kernel_size, stride, row_size, col_size, pooling, actor_lr = 0.0001,
-                 critic_lr = 0.001, writer = None, policy_delay = 30, position_encode = 32, forget = False, max_len = 10080):
-        self.n_action = num_zone
+                 critic_lr = 0.001, writer = None, policy_delay = 30, position_encode = 32, forget = False, max_len = 10080, action_mode="price_only"):
+        self.joint = action_mode == "joint"
+        self.critic_updates, self.last_metrics = 0, {}
+        self.n_action = num_zone * (2 if self.joint else 1)
+        extra = num_zone * max_duration if self.joint else 0
         self.writer = writer
         self.actor = ActorCNN(row_size,\
             col_size, \
-            num_zone * (max_traveling + max_duration), \
+            num_zone * (max_traveling + max_duration) + extra, \
             num_zone, \
             channels = [total_channel, 128, 32], \
             kernel_size_conv=kernel_size,\
             stride_size_conv=stride,\
             kernel_size_pool=pooling,\
             stride_size_pool=pooling,\
-            shapes = [128, 128, num_zone], n = position_encode, max_len = max_len)
+            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint)
         self.actor_target = ActorCNN(row_size,\
             col_size, \
-            num_zone * (max_traveling + max_duration), \
+            num_zone * (max_traveling + max_duration) + extra, \
             num_zone, \
             channels = [total_channel, 128, 32], \
             kernel_size_conv=kernel_size,\
             stride_size_conv=stride,\
             kernel_size_pool=pooling,\
             stride_size_pool=pooling,\
-            shapes = [128, 128, num_zone], n = position_encode, max_len = max_len)
+            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint)
         self.actor_optim  = Adam(self.actor.parameters(), lr=actor_lr)
 
         self.critic = TwinCriticCNN(row_size,\
             col_size, \
-            num_zone * (max_traveling + max_duration + 1), \
+            num_zone * (max_traveling + max_duration) + extra + self.n_action, \
             num_zone,\
             channels = [total_channel, 128, 32], \
             kernel_size_conv=kernel_size,\
@@ -255,7 +282,7 @@ class TD3_CNN_deep(TD3):
             shapes = [128, 128, 1], n = position_encode, max_len = max_len)
         self.critic_target = TwinCriticCNN(row_size,\
             col_size, \
-            num_zone * (max_traveling + max_duration + 1), \
+            num_zone * (max_traveling + max_duration) + extra + self.n_action, \
             num_zone,\
             channels = [total_channel, 128, 32], \
             kernel_size_conv=kernel_size,\
