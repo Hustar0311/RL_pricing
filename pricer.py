@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 import copy
+import json
+from pathlib import Path
 from torch.optim import Adam
 from model import ActorMLP, ProbActorMLP, CriticMLP, TwinCriticMLP, ActorCNN, ProbActorCNN, CriticCNN, TwinCriticCNN, SACCriticMLP, SACCriticCNN
 from torch.distributions import MultivariateNormal
@@ -64,6 +66,14 @@ class Pricer:
     def load_weights(self, output, epoch):
 
         if output is None: return
+        spec = getattr(self, "action_spec", None)
+        metadata_path = Path(output) / ("action_spec_{}.json".format(epoch))
+        if metadata_path.exists() and spec is not None:
+            saved = json.loads(metadata_path.read_text(encoding="utf-8"))
+            if saved.get("action_space") != spec.metadata():
+                raise ValueError("checkpoint action mode, dimensions or compensation bounds do not match")
+        elif spec is not None and spec.mode == "joint":
+            raise ValueError("joint mode requires a versioned joint checkpoint")
 
         self.actor.load_state_dict(
             torch.load('{}actor_{}.pkl'.format(output, epoch))
@@ -91,6 +101,9 @@ class Pricer:
 
 
     def save_model(self, output, epoch):
+        if hasattr(self, "action_spec"):
+            (Path(output) / ("action_spec_{}.json".format(epoch))).write_text(
+                json.dumps({"action_space": self.action_spec.metadata()}, indent=2), encoding="utf-8")
         torch.save(
             self.actor.state_dict(),
             '{}actor_{}.pkl'.format(output, epoch)
