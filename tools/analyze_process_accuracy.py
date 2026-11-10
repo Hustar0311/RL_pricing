@@ -126,6 +126,13 @@ def scan_invariants(step_df, metadata, test_id):
                                 row["price_min"], f"Minimum price multiplier must be >= {lower}."))
         rows.append(boolean_row(test_id, step, "price_upper_bound", row["price_max"] <= upper + TOL,
                                 row["price_max"], f"Maximum price multiplier must be <= {upper}."))
+        action_space = metadata.get("action_space", {})
+        if action_space.get("mode") == "joint":
+            q_lower, q_upper = action_space["compensation_bounds"]
+            rows.append(boolean_row(test_id, step, "compensation_lower_bound", row["compensation_min"] >= q_lower-TOL,
+                                    row["compensation_min"], "Compensation must respect its own bounds."))
+            rows.append(boolean_row(test_id, step, "compensation_upper_bound", row["compensation_max"] <= q_upper+TOL,
+                                    row["compensation_max"], "Compensation must respect its own bounds."))
         rows.append(boolean_row(test_id, step, "actual_not_above_potential",
                                 row["actual_passenger_count"] <= row["potential_passenger_count"] + TOL,
                                 row["actual_passenger_count"], "Actual entered demand cannot exceed potential demand."))

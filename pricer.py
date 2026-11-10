@@ -75,29 +75,10 @@ class Pricer:
         elif spec is not None and spec.mode == "joint":
             raise ValueError("joint mode requires a versioned joint checkpoint")
 
-        self.actor.load_state_dict(
-            torch.load('{}actor_{}.pkl'.format(output, epoch))
-        )
-
-        self.critic.load_state_dict(
-            torch.load('{}critic_{}.pkl'.format(output, epoch))
-        )
-
-        self.actor_target.load_state_dict(
-            torch.load('{}actor_target_{}.pkl'.format(output, epoch))
-        )
-
-        self.critic_target.load_state_dict(
-            torch.load('{}critic_target_{}.pkl'.format(output, epoch))
-        )
-
-        self.actor_optim.load_state_dict(
-            torch.load('{}actor_optim_{}.pkl'.format(output, epoch))
-        )
-
-        self.critic_optim.load_state_dict(
-            torch.load('{}critic_optim_{}.pkl'.format(output, epoch))
-        )
+        device = next(self.actor.parameters()).device
+        for name in ["actor", "critic", "actor_target", "critic_target", "actor_optim", "critic_optim"]:
+            value = torch.load('{}{}_{}.pkl'.format(output, name, epoch), map_location=device, weights_only=False)
+            getattr(self, name).load_state_dict(value)
 
 
     def save_model(self, output, epoch):
