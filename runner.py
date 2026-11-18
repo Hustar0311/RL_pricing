@@ -222,16 +222,8 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
                                                  od_permutation=args.od_permutation,
                                                  policy_constr=args.policy_constr,
                                                  last_pricing=env.pricing_multipliers[0, :])
-            dd_train_ = np.zeros(dd_train[t:(t + args.frequency), :, :].shape)
-            ind = dd_train[t:(t + args.frequency), :, :] > 0
-            dd_train_[ind] = np.random.poisson(dd_train[t:(t + args.frequency), :, :][ind])
-            temp_demands = np.floor(dd_train_ * price_sensitivity(temp_p[None, :, None], args.pricing_mode))
-            temp_demands += np.random.binomial(1, (
-                    dd_train_ * price_sensitivity(temp_p[None, :, None], args.pricing_mode) - temp_demands))
-        temp_demand = temp_demands[t % args.frequency]
-        dd_train_ = np.random.poisson(dd_train[t, :, :]).astype(int)
-        temp_demand = dd_train_
-        # temp_demand += np.random.binomial(1, (dd_train_ / temp_p[:, None] - temp_demand))
+        # Draw demand once per minute during evaluation warm-up.
+        temp_demand = np.random.poisson(dd_train[t, :, :]).astype(int)
         env.step(temp_demand, temp_schedule, temp_p)
 
     for t in range(T_test):

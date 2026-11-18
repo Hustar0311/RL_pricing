@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import argparse
 import os
+import random
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from runner import train, test
@@ -34,6 +35,8 @@ def get_arguments(argv):
                         help='pricing algorithms, can be ddpg_MLP, ddpg_CNN, dummy, or equilibrium')
     parser.add_argument('-c', '--device', type=str, default='cpu',
                         help='cpu or gpu (cuda)')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='require deterministic PyTorch algorithms on the selected device')
     parser.add_argument('-f', '--frequency', type=int, default=1,
                         help='pricing freqency')  # update the price every minute
     parser.add_argument('-pc', '--policy_constr', action='store_true', default=False,
@@ -75,10 +78,17 @@ if __name__ == '__main__':
     # loading arguments
     args = get_arguments(sys.argv[1:])
 
+    if args.deterministic:
+        if args.device == 'cuda':
+            os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+
     torch.manual_seed(args.seed)
     if args.device == 'cuda':
         torch.cuda.manual_seed(args.seed)
     np.random.seed(args.seed)
+    random.seed(args.seed)
 
     permutation_tag = '' if not args.od_permutation else '_perm'
     constraint_tag = '' if not args.policy_constr else '_constr' # unused for this study
@@ -88,6 +98,8 @@ if __name__ == '__main__':
     scenario_tag = args.data_folder.replace("/", "_")
     settings_tag = args.pricing_alg + permutation_tag + constraint_tag + auto_tag + forget_tag + "_" +args.searching + "_" +\
                    str(args.policy_delay) +"_"+str(args.position_encode) + "_" + args.name
+    if args.deterministic:
+        settings_tag += "_deterministic"
     hyperp_tag = str(args.batch_size) + "_" + str(args.actor_lr) + "_" + str(args.critic_lr) + "_" + str(args.kernel_size)
 
     # prepare the folders for storing the results
