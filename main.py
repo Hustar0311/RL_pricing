@@ -95,6 +95,7 @@ def write_metadata(args, result_folder):
         "mode": args.mode,
         "name": args.name,
         "seed": args.seed,
+        "deterministic": args.deterministic,
         "n_epochs": args.n_epochs,
         "min_price_multiplier": MINP,
         "max_price_multiplier": MAXP,
@@ -222,6 +223,8 @@ def get_arguments(argv):
                         help='pricing algorithms, can be ddpg_MLP, ddpg_CNN, dummy, or equilibrium')
     parser.add_argument('-c', '--device', type=str, default='cpu',
                         help='cpu or gpu (cuda)')
+    parser.add_argument('--deterministic', action='store_true',
+                        help='require deterministic PyTorch algorithms on the selected device')
     parser.add_argument('-f', '--frequency', type=int, default=1,
                         help='pricing freqency')  # update the price every minute
     parser.add_argument('--action_mode', choices=['price_only', 'joint'], default='price_only',
@@ -317,6 +320,12 @@ if __name__ == '__main__':
     args = get_arguments(sys.argv[1:])
     is_train_mode = args.mode in ['all', 'train']
 
+    if args.deterministic:
+        if args.device == 'cuda':
+            os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':4096:8')
+        torch.backends.cudnn.benchmark = False
+        torch.use_deterministic_algorithms(True)
+
     torch.manual_seed(args.seed)
     if args.device == 'cuda':
         torch.cuda.manual_seed(args.seed)
@@ -335,6 +344,8 @@ if __name__ == '__main__':
     if args.action_mode == 'joint':
         settings_tag += '_joint_q{}_{}_f{}'.format(tag_float(args.compensation_min),
             tag_float(args.compensation_max), args.frequency)
+    if args.deterministic:
+        settings_tag += "_deterministic"
     hyperp_tag = str(args.batch_size) + "_" + str(args.actor_lr) + "_" + str(args.critic_lr) + "_" + str(args.kernel_size)
 
     # prepare the folders for storing the results
