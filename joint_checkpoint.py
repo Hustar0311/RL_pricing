@@ -33,6 +33,24 @@ def contract(controller, args):
             "configuration": configuration}
 
 
+def keep_replay(args, epoch):
+    """--save_replay last (default): only the final epoch carries the replay buffer; none: never."""
+    mode = getattr(args, "save_replay", "last")
+    return mode == "last" and epoch == args.n_epochs
+
+
+def prune_checkpoints(folder, keep, newest):
+    """Delete per-epoch model files older than the ``keep`` most recent epochs (<= 0 keeps everything)."""
+    if keep <= 0:
+        return
+    import re
+    for path in Path(folder).iterdir():
+        match = re.search(r"_(\d+)\.(pt|pkl|json)$", path.name)
+        if match and path.name.startswith(("joint_checkpoint", "actor", "critic", "action_spec")) \
+                and int(match.group(1)) <= newest - keep:
+            path.unlink()
+
+
 def save_checkpoint(controller, env, args, epoch):
     pricer = controller.pricer
     payload = {
@@ -42,7 +60,7 @@ def save_checkpoint(controller, env, args, epoch):
         "learner": {key: getattr(pricer, key) for key in
                     ["update_time", "critic_updates", "policy_freq", "last_metrics"]},
         "epsilon": controller.epsilon, "noise": getattr(controller, "noise", None),
-        "environment": env.__dict__, "replay": controller.buffer.memory,
+        "environment": env.__dict__, "replay": controller.buffer.memory if keep_replay(args, epoch) else None,
         "rng": {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(),
                 "cuda": torch.cuda.get_rng_state_all() if str(args.device) == "cuda" else []},
     }
@@ -51,6 +69,7 @@ def save_checkpoint(controller, env, args, epoch):
     controller.pricer.save_model(str(folder) + "/", epoch)
     (folder / ("action_spec_{}.json".format(epoch))).write_text(
         json.dumps(payload["contract"], indent=2), encoding="utf-8")
+    prune_checkpoints(folder, getattr(args, "keep_checkpoints", 2), epoch)
 
 
 def load_checkpoint(controller, env, args, epoch, training=True):
@@ -62,6 +81,9 @@ def load_checkpoint(controller, env, args, epoch, training=True):
         raise ValueError("checkpoint action space, state layout or experiment configuration does not match")
     if payload.get("epoch") != epoch:
         raise ValueError("checkpoint epoch does not match requested resume")
+    if training and payload.get("replay") is None:
+        raise ValueError("checkpoint was saved without its replay buffer (--save_replay last/none); "
+                         "only the final epoch of a --save_replay last run can be resumed")
     controller.device = args.device
     controller.buffer.device = args.device
     for name in ["actor", "actor_target", "critic", "critic_target"]:

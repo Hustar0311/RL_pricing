@@ -314,6 +314,10 @@ def build_parser():
                         help='utility subtracted when a driver changes between online and offline')
     parser.add_argument('--env_rng', choices=['legacy', 'isolated'], default='legacy',
                         help='isolated: the environment owns a numpy Generator instead of drawing from the global random lists')
+    parser.add_argument('--keep_checkpoints', type=int, default=2,
+                        help='joint runner: keep only the N most recent per-epoch model files (0 keeps all)')
+    parser.add_argument('--save_replay', choices=['last', 'none'], default='last',
+                        help='joint runner: store the replay buffer only with the final epoch (last) or never (none)')
     parser.add_argument('--snapshot_steps', type=str, default='',
                         help='comma-separated test minutes at which evaluation saves a simulator snapshot (joint runner)')
     parser.add_argument('--br_random_seed', type=int, default=None,
