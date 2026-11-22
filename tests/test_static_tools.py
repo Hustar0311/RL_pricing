@@ -50,24 +50,65 @@ class StaticToolTests(unittest.TestCase):
         self.assertEqual((s, profit), (0.7, 8.0))
 
     def test_paired_delta_splits_into_allocation_and_efficiency(self):
-        a = [{"profit": 10.0, "income": 5.0, "revenue": 20.0}, {"profit": 12.0, "income": 6.0, "revenue": 22.0}]
-        b = [{"profit": 13.0, "income": 5.0, "revenue": 23.0}, {"profit": 15.0, "income": 7.0, "revenue": 26.0}]
+        row = lambda profit, income, minutes: {"profit": profit, "income": income, "online_minutes": minutes, "wage": 1.0}
+        a = [row(10.0, 5.0, 100.0), row(12.0, 6.0, 100.0)]
+        b = [row(13.0, 5.0, 90.0), row(15.0, 7.0, 90.0)]
         d = dec.paired_delta(b, a)
         self.assertAlmostEqual(d["profit"]["mean"], 3.0)
         self.assertAlmostEqual(d["allocation"]["mean"], -0.5)
         self.assertAlmostEqual(d["allocation"]["mean"] + d["efficiency"]["mean"], d["profit"]["mean"])
+        self.assertAlmostEqual(d["supply_channel"]["mean"], 5.5 / 100.0 * 10.0)  # 10 fewer paid driver-minutes at 0.055/min
+
+    def test_policy_families_nest_exactly(self):
+        prices, shares = np.array([1.1, 1.2, 1.3, 1.4]), np.full(8, 0.7)
+        for kind in dec.KINDS:
+            theta = dec.embed(kind, np.full(4, 1.25), np.full(8, 0.6))
+            p, s = dec.canonical(kind, theta)
+            np.testing.assert_array_equal(p, np.full(4, 1.25))
+            np.testing.assert_array_equal(s, np.full(8, 0.6))
+        # (a') solution embeds into (b') without change
+        theta_b1 = dec.embed("b1", prices, shares)
+        np.testing.assert_array_equal(np.r_[dec.canonical("b1", theta_b1)[0], dec.canonical("b1", theta_b1)[1]], np.r_[prices, shares])
+        self.assertEqual([dec.KINDS[k] for k in ["a", "a1", "b", "b1"]], [2, 5, 9, 12])
+
+    def test_constraint_forms_have_unit_baseline(self):
+        rows = [{"income": 100.0, "wage": 50.0, "served": 20.0, "trip_distance": 40.0, "trip_minutes": 80.0, "profit": 1.0}] * 3
+        for form, value in [("hourly", 50.0), ("budget", 100.0), ("per_trip", 1.0)]:
+            con = dec.Constraint(form, 1.2, rows)
+            self.assertAlmostEqual(con.baseline_value, value)
+            self.assertAlmostEqual(con.target, 1.2 * value)
+            self.assertFalse(con.score(rows)[0] == con.score(rows)[1])  # a 20% shortfall is penalised
 
     def test_decoupled_policy_maps_time_blocks_and_zone_groups(self):
         group = (SCENARIO.dd_train.sum(axis=(0, 2)) > np.median(SCENARIO.dd_train.sum(axis=(0, 2)))).astype(int)
         dec._CTX.update(base=lib.constant_policy(SCENARIO), group=group)
-        theta = [1.3] + [0.1 * (i + 1) + 0.3 for i in range(8)]  # shares 0.4 ... 1.1 (unclipped test values)
-        policy = dec.make_policy("decoupled", theta)
+        prices, shares = np.array([1.0, 1.1, 1.2, 1.3]), np.arange(8) * 0.1 + 0.3
+        policy = dec.make_policy(np.r_[prices, shares])
         env = lib.make_environment(SCENARIO, MARKET, 3)
         for t, block in [(0, 0), (359, 0), (360, 1), (1439, 3)]:
             action = policy.decide(env, t)
-            expected = np.array(theta[1:]).reshape(4, 2)[block][group]
-            np.testing.assert_allclose(action.share, expected)
-            np.testing.assert_allclose(action.price, 1.3)
+            np.testing.assert_allclose(action.share, shares.reshape(4, 2)[block][group])
+            np.testing.assert_allclose(action.price, prices[block])
+
+    def test_pay_weighted_zone_choice_follows_zone_pay(self):
+        market = lib.market_namespace({}, dict(use_passenger_entry_br=True, use_driver_online_br=True, online_zone_choice="pay_weighted"))
+        env = lib.make_environment(SCENARIO, market, 3)
+        env.zone_profit = np.zeros(16)
+        env.zone_profit[5] = 100.0
+        zones = [env._choose_online_zone(u) for u in np.linspace(0.01, 0.99, 50)]
+        self.assertGreater(np.mean(np.array(zones) == 5), 0.95)
+        default = lib.make_environment(SCENARIO, MARKET, 3)
+        self.assertEqual(default.online_zone_choice, "random")
+        self.assertEqual(default._choose_online_zone(0.5), 8)
+
+    def test_profile_concentration_shrinks_spread_only(self):
+        import tempfile
+        from tools.make_scenario import main as make
+        with tempfile.TemporaryDirectory() as root:
+            wide = np.load(make(["--name", "w", "--output_root", root, "--fleet_multiplier", "2"]) / "vp.npy")
+            narrow = np.load(make(["--name", "n", "--output_root", root, "--fleet_multiplier", "2", "--profile_concentration", "0.5"]) / "vp.npy")
+        self.assertAlmostEqual(narrow.mean(), wide.mean(), places=6)
+        self.assertAlmostEqual(narrow.std(), wide.std() * 0.5, places=6)
 
 
 if __name__ == "__main__":

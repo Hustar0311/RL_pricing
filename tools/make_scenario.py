@@ -41,6 +41,8 @@ def main(argv=None):
     parser.add_argument("--fleet_multiplier", type=int, default=1)
     parser.add_argument("--profile_scale", type=float, default=1.0)
     parser.add_argument("--demand_scale", type=float, default=1.0)
+    parser.add_argument("--profile_concentration", type=float, default=1.0,
+                        help="scale the spread of reservation profiles around their mean (<1 concentrates them)")
     parser.add_argument("--profile_jitter", type=float, default=0.05, help="relative std of the jitter on copied profiles")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output_root", default=str(SCENARIOS))
@@ -54,6 +56,9 @@ def main(argv=None):
     target.mkdir(exist_ok=True)
     arrays = build(Path(args.source), args.fleet_multiplier, args.profile_scale, args.demand_scale,
                    args.profile_jitter, args.seed)
+    if args.profile_concentration != 1.0:
+        centre = arrays["vp"].mean()
+        arrays["vp"] = np.clip(centre + args.profile_concentration * (arrays["vp"] - centre), 0.05, None)
     for name, value in arrays.items():
         np.save(target / (name + ".npy"), value)
     meta = {k: v for k, v in vars(args).items()}

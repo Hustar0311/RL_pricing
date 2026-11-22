@@ -133,6 +133,7 @@ def write_metadata(args, result_folder):
             "driver_decision_interval": args.driver_decision_interval,
             "driver_switch_cost": args.driver_switch_cost,
             "env_rng": args.env_rng,
+            "online_zone_choice": args.online_zone_choice,
         },
         "process_audit_enabled": bool(args.enable_process_audit),
         "event_order": [
@@ -312,6 +313,9 @@ def build_parser():
                         help='driver k re-decides online/offline only when (t + k) mod T == 0; 1 keeps the legacy every-minute rule')
     parser.add_argument('--driver_switch_cost', type=float, default=0.0,
                         help='utility subtracted when a driver changes between online and offline')
+    parser.add_argument('--online_zone_choice', choices=['random', 'pay_weighted'], default='random',
+                        help='pay_weighted: drivers going online pick the zone with probability proportional to the '
+                             '30-minute zone pay signal (default: uniformly random zone)')
     parser.add_argument('--env_rng', choices=['legacy', 'isolated'], default='legacy',
                         help='isolated: the environment owns a numpy Generator instead of drawing from the global random lists')
     parser.add_argument('--keep_checkpoints', type=int, default=2,

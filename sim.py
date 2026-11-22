@@ -93,6 +93,9 @@ class Environment:
         self.passenger_calibration = getattr(config, "passenger_calibration", "none")
         if self.passenger_calibration not in ("none", "anchor"):
             raise ValueError("passenger_calibration must be none or anchor")
+        self.online_zone_choice = getattr(config, "online_zone_choice", "random")
+        if self.online_zone_choice not in ("random", "pay_weighted"):
+            raise ValueError("online_zone_choice must be random or pay_weighted")
         self.target_demand_elasticity = float(getattr(config, "target_demand_elasticity", -1.0))
         self.passenger_anchor_utility = float(getattr(config, "passenger_anchor_utility", 1.0))
         self.passenger_anchor_price = float(getattr(config, "passenger_anchor_price", 1.0))
@@ -223,6 +226,19 @@ class Environment:
         if switch_offset:
             utility = utility + switch_offset
         return float(self._sigmoid_probability(utility, self.beta_driver))
+
+    def _choose_online_zone(self, uniform):
+        """Zone of a driver who goes online: uniform (legacy) or weighted by the 30-minute zone pay signal."""
+        if self.online_zone_choice == "pay_weighted":
+            if uniform is None:
+                if len(self.rand_double) == 0:
+                    self.rand_double = list(np.random.random(size=100000))
+                uniform = self.rand_double.pop()
+            cumulative = np.cumsum(self.zone_profit + 1e-4)
+            return int(min(np.searchsorted(cumulative, uniform * cumulative[-1], side="right"), self.num_zone - 1))
+        if uniform is not None:
+            return min(int(uniform * self.num_zone), self.num_zone - 1)
+        return self.rand_int.pop()
 
     def _driver_decides(self, vehicle):
         return self.driver_decision_interval == 1 or (self.step_index + vehicle.id) % self.driver_decision_interval == 0
@@ -576,7 +592,7 @@ class Environment:
                     switch_to_online += 1
                     v.state = 0
                     v.waiting = 0
-                    v.loc = min(int(move_u[2, v.id] * self.num_zone), self.num_zone - 1) if isolated else self.rand_int.pop()
+                    v.loc = self._choose_online_zone(move_u[2, v.id] if isolated else None)
                     v.trace_from_zone = v.loc
                     v.trace_to_zone = v.loc
                     v.trace_total_time = 0
