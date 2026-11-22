@@ -128,3 +128,20 @@ class ElasticityToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CounterfactualToolTests(unittest.TestCase):
+    def test_paired_report_shape_and_signs(self):
+        from tools.counterfactual_eval import evaluate
+        policy = lib.constant_policy(SCENARIO)
+        m = market()
+        state, held, t0 = lib.build_start_state(SCENARIO, policy, m, 100, 1)
+        arms = [lib.Intervention.parse("demand_shock:1.0@10", 10), lib.Intervention.parse("remove_drivers:4", 10),
+                lib.Intervention.parse("share_set:0.9", 10)]
+        report = evaluate(SCENARIO, policy, m, state, held, t0, arms, 6, 20, 1, horizons=[1, 5, 15])
+        self.assertEqual(set(report), {"demand_shock:1@10", "remove_drivers:4@10", "share_set:0.9@10"})
+        shock = report["demand_shock:1@10"]["15"]["served"]
+        self.assertGreater(shock["diff"], 0)
+        removed = report["remove_drivers:4@10"]["15"]["online_vehicles"]
+        self.assertLess(removed["diff"], 0)
+        self.assertEqual(report["share_set:0.9@10"]["1"]["revenue"]["diff"], 0.0)  # same prices, same first-minute revenue
