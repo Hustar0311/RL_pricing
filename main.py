@@ -243,10 +243,17 @@ def build_parser():
     parser.add_argument('--compensation_max', type=float, default=2.0)
     parser.add_argument('--share_value', type=float, default=0.75,
                         help='fixed_share: global driver share s (q = s * p / delta)')
-    parser.add_argument('--share_min', type=float, default=0.45,
+    parser.add_argument('--share_min', type=float, default=0.2,
                         help='lower bound of the learned driver share (learned_share, joint_share)')
     parser.add_argument('--share_max', type=float, default=0.95,
                         help='upper bound of the learned driver share (learned_share, joint_share)')
+    parser.add_argument('--share_lr', type=float, default=1e-3,
+                        help='learning rate of the share-only actor parameters (learned_share; joint_share with '
+                             '--share_head_separate); they form their own optimizer group and skip actor gradient clipping')
+    parser.add_argument('--share_init', type=float, default=None,
+                        help='initial driver share of learned_share / joint_share (default: midpoint of the bounds)')
+    parser.add_argument('--share_head_separate', action='store_true', default=False,
+                        help='joint_share: give the share outputs their own linear head, learning rate and clipping exemption')
     parser.add_argument('-pc', '--policy_constr', action='store_true', default=False,
                         help='constrained pricing change speed')  # constrained policy
     parser.add_argument('-re', '--resume', type=int, default=0,
@@ -344,6 +351,13 @@ def get_arguments(argv):
             parser.error('anchor calibration needs beta_passenger > 0, a negative target elasticity and p0 > 0')
     if args.driver_decision_interval < 1 or args.driver_switch_cost < 0:
         parser.error('driver_decision_interval must be >= 1 and driver_switch_cost >= 0')
+    if args.share_lr <= 0:
+        parser.error('share_lr must be positive')
+    if args.share_init is not None and not (
+            args.action_mode in ('learned_share', 'joint_share') and args.share_min < args.share_init < args.share_max):
+        parser.error('share_init needs learned_share/joint_share and share_min < share_init < share_max')
+    if args.share_head_separate and args.action_mode != 'joint_share':
+        parser.error('share_head_separate applies to joint_share only')
     try:
         args.snapshot_steps = [int(v) for v in str(args.snapshot_steps).split(',') if v.strip()]
     except ValueError:
@@ -402,6 +416,10 @@ if __name__ == '__main__':
         else:
             settings_tag += '_s{}_{}'.format(tag_float(args.share_min), tag_float(args.share_max))
         settings_tag += '_f{}'.format(args.frequency)
+        if args.share_init is not None:
+            settings_tag += '_si{}'.format(tag_float(args.share_init))
+        if args.share_lr != 1e-3 or args.share_head_separate:
+            settings_tag += '_slr{}{}'.format(tag_float(args.share_lr), 'h' if args.share_head_separate else '')
     if args.passenger_calibration != 'none':
         settings_tag += '_cal{}_e{}'.format(args.passenger_calibration, tag_float(args.target_demand_elasticity))
     if args.driver_decision_interval != 1 or args.driver_switch_cost != 0:
@@ -575,7 +593,8 @@ if __name__ == '__main__':
             searching=args.searching, policy_delay=args.policy_delay, position_encode=args.position_encode,
             auto_correlation=args.auto_correlation, forget=args.forget, T_train=T_train,
             action_mode=args.action_mode, compensation_min=args.compensation_min, compensation_max=args.compensation_max,
-            share_min=args.share_min, share_max=args.share_max, share_value=args.share_value)
+            share_min=args.share_min, share_max=args.share_max, share_value=args.share_value,
+            share_lr=args.share_lr, share_init=args.share_init, share_head_separate=args.share_head_separate)
         if is_train_mode:
             start_sync = safe_cuda_synchronize(args.device)
             start_time, start_counter = datetime.now(), time.perf_counter()

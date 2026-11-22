@@ -6,7 +6,7 @@ from pathlib import Path
 from torch.optim import Adam
 from model import ActorMLP, ProbActorMLP, CriticMLP, TwinCriticMLP, ActorCNN, ProbActorCNN, CriticCNN, TwinCriticCNN, SACCriticMLP, SACCriticCNN
 from torch.distributions import MultivariateNormal
-from economic_action import JOINT_RUNNER_MODES, LEARNED_SHARE, action_dimension
+from economic_action import JOINT_RUNNER_MODES, JOINT_SHARE, LEARNED_SHARE, action_dimension
 
 criterion = torch.nn.MSELoss()
 MAX_GRAD_NORM_ACTOR = 0.01
@@ -112,6 +112,25 @@ class Pricer:
         )
 
 class TD3(Pricer):
+    def _configure_share_group(self, actor_lr, share_lr, share_init_logit):
+        """Actor optimizer; share-only parameters get their own learning rate and skip gradient clipping."""
+        share = list(self.actor.share_parameters())
+        self.share_param_ids = {id(p) for p in share}
+        if share and hasattr(self.actor, "free_logit_init"):
+            for net in (self.actor, self.actor_target):
+                net.free_logit_init = share_init_logit
+        if share and share_lr is not None:
+            main = [p for p in self.actor.parameters() if id(p) not in self.share_param_ids]
+            self.actor_optim = Adam([{"params": main, "lr": actor_lr}, {"params": share, "lr": share_lr}])
+        else:
+            self.actor_optim = Adam(self.actor.parameters(), lr=actor_lr)
+
+    def _clipped_actor_parameters(self):
+        ids = getattr(self, "share_param_ids", None)
+        if not ids:
+            return self.actor.parameters()
+        return [p for p in self.actor.parameters() if id(p) not in ids]
+
     def next_udpate_step(self, update_time):
         if self.policy_delay  == 0: # return n/ln(n+1), given the update frequency = 10 and buffer_size = 100800 (small case),
             # for 10000 updates of the value networks, nearly all buffers (10*10000 steps) are the wanted data
@@ -175,7 +194,7 @@ class TD3(Pricer):
                 self.writer.add_scalar("TD3_loss/policy_loss", policy_loss, iter)
             self.actor.zero_grad()
             policy_loss.backward()
-            actor_norm = torch.nn.utils.clip_grad_norm_(self.actor.parameters(), MAX_GRAD_NORM_ACTOR)
+            actor_norm = torch.nn.utils.clip_grad_norm_(self._clipped_actor_parameters(), MAX_GRAD_NORM_ACTOR)
             if not torch.isfinite(actor_norm):
                 raise FloatingPointError("non-finite TD3 actor gradient")
             self.actor_optim.step()
@@ -203,16 +222,18 @@ class TD3(Pricer):
 
 class TD3_MLP(TD3):
     def __init__(self, num_zone, max_waiting, max_duration, max_traveling, actor_lr = 0.0001, critic_lr = 0.001, writer = None, policy_delay = 30,
-                 position_encode = 32, forget = False, max_len = 10080, action_mode="price_only"):
+                 position_encode = 32, forget = False, max_len = 10080, action_mode="price_only",
+                 share_lr = None, share_init_logit = 0.0, share_head_separate = False):
         
         self.joint = action_mode in JOINT_RUNNER_MODES
         self.critic_updates, self.last_metrics = 0, {}
         self.n_action = action_dimension(action_mode, num_zone)
         free = 1 if action_mode == LEARNED_SHARE else 0
+        head = num_zone if (action_mode == JOINT_SHARE and share_head_separate) else 0
         extra = num_zone * max_duration if self.joint else 0
-        self.actor = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint, state_free_dim=free)
-        self.actor_target = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint, state_free_dim=free)
-        self.actor_optim = Adam(self.actor.parameters(), lr=actor_lr)
+        self.actor = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint, state_free_dim=free, separate_head_dim=head)
+        self.actor_target = ActorMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, self.n_action], n=position_encode, max_len=max_len, extra_state_dim=extra, bounded_output=self.joint, state_free_dim=free, separate_head_dim=head)
+        self._configure_share_group(actor_lr, share_lr, share_init_logit)
 
         self.critic = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, 1], n=position_encode, max_len=max_len, extra_state_dim=extra, action_dim=self.n_action)
         self.critic_target = TwinCriticMLP(num_zone, max_waiting, max_duration, max_traveling, [128, 128, 1], n=position_encode, max_len=max_len, extra_state_dim=extra, action_dim=self.n_action)
@@ -238,11 +259,13 @@ class TD3_MLP(TD3):
 
 class TD3_CNN_deep(TD3):
     def __init__(self, num_zone, max_duration, max_traveling, total_channel, kernel_size, stride, row_size, col_size, pooling, actor_lr = 0.0001,
-                 critic_lr = 0.001, writer = None, policy_delay = 30, position_encode = 32, forget = False, max_len = 10080, action_mode="price_only"):
+                 critic_lr = 0.001, writer = None, policy_delay = 30, position_encode = 32, forget = False, max_len = 10080, action_mode="price_only",
+                 share_lr = None, share_init_logit = 0.0, share_head_separate = False):
         self.joint = action_mode in JOINT_RUNNER_MODES
         self.critic_updates, self.last_metrics = 0, {}
         self.n_action = action_dimension(action_mode, num_zone)
         free = 1 if action_mode == LEARNED_SHARE else 0
+        head = num_zone if (action_mode == JOINT_SHARE and share_head_separate) else 0
         extra = num_zone * max_duration if self.joint else 0
         self.writer = writer
         self.actor = ActorCNN(row_size,\
@@ -254,7 +277,7 @@ class TD3_CNN_deep(TD3):
             stride_size_conv=stride,\
             kernel_size_pool=pooling,\
             stride_size_pool=pooling,\
-            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint, state_free_dim=free)
+            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint, state_free_dim=free, separate_head_dim=head)
         self.actor_target = ActorCNN(row_size,\
             col_size, \
             num_zone * (max_traveling + max_duration) + extra, \
@@ -264,8 +287,8 @@ class TD3_CNN_deep(TD3):
             stride_size_conv=stride,\
             kernel_size_pool=pooling,\
             stride_size_pool=pooling,\
-            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint, state_free_dim=free)
-        self.actor_optim  = Adam(self.actor.parameters(), lr=actor_lr)
+            shapes = [128, 128, self.n_action], n = position_encode, max_len = max_len, bounded_output=self.joint, state_free_dim=free, separate_head_dim=head)
+        self._configure_share_group(actor_lr, share_lr, share_init_logit)
 
         self.critic = TwinCriticCNN(row_size,\
             col_size, \

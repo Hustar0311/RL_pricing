@@ -28,7 +28,7 @@ class ActionSpec:
     mode: str = "price_only"
     compensation_min: float = 0.5
     compensation_max: float = 2.0
-    share_min: float = 0.45
+    share_min: float = 0.2
     share_max: float = 0.95
     share_value: float = 0.75
     delta: float = DEFAULT_DELTA
@@ -55,7 +55,7 @@ class ActionSpec:
         return cls(num_zone if num_zone is not None else getattr(args, "num_zone", 1),
                    getattr(args, "action_mode", PRICE_ONLY),
                    getattr(args, "compensation_min", 0.5), getattr(args, "compensation_max", 2.0),
-                   getattr(args, "share_min", 0.45), getattr(args, "share_max", 0.95),
+                   getattr(args, "share_min", 0.2), getattr(args, "share_max", 0.95),
                    getattr(args, "share_value", 0.75))
 
     @property

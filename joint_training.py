@@ -135,6 +135,11 @@ def train_joint(env, controller, rates, writer, args):
             row.update(share_mean=share_sum/len(rates), share_min=share_min, share_max=share_max)
         history.append(row)
         metrics = dict(controller.pricer.last_metrics)
+        if getattr(controller.pricer.actor, "state_free_dim", 0):
+            # deterministic learned share implied by the state-independent parameter (exploration noise excluded)
+            spec = controller.action_spec
+            unit = float(torch.tanh(controller.pricer.actor.free_logit.detach())[0])
+            metrics["learned_share_value"] = spec.share_min + (unit + 1.0) * 0.5 * (spec.share_max - spec.share_min)
         metrics.update(epoch=epoch, critic_updates=controller.pricer.critic_updates,
                        actor_updates=controller.pricer.update_time, replay_size=len(controller.buffer),
                        actor_parameter_change=float(torch.linalg.vector_norm(_parameter_vector(controller.pricer.actor)-actor_before)),

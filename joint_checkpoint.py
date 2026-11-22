@@ -11,6 +11,7 @@ OPTIONAL_CONTRACT_DEFAULTS = {
     "env_rng": "legacy", "passenger_calibration": "none", "target_demand_elasticity": -1.0,
     "passenger_anchor_utility": 1.0, "passenger_anchor_price": 1.0,
     "driver_decision_interval": 1, "driver_switch_cost": 0.0,
+    "share_lr": 1e-3, "share_init": None, "share_head_separate": False,
 }
 
 

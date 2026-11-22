@@ -81,9 +81,9 @@ class ShareModeTests(unittest.TestCase):
         np.testing.assert_array_equal(spec.decode(actions[0]).share, np.full(16, 0.75))
         joint_share = run_trajectory("joint_share", spec, actions, self.controller, self.STEPS)
         self.assertSameTrajectory(fixed, joint_share)
-        # default bounds: x=0.2 decodes to 0.75 up to rounding
+        # default bounds (0.2, 0.95): this x decodes to 0.75 up to rounding
         default = ActionSpec(16, "joint_share")
-        np.testing.assert_allclose(default.decode(np.r_[self.prices[0], np.full(16, 0.2)]).share, 0.75)
+        np.testing.assert_allclose(default.decode(np.r_[self.prices[0], np.full(16, 2 * (0.75 - 0.2) / 0.75 - 1)]).share, 0.75)
 
     def test_driver_payment_is_share_of_passenger_revenue(self):
         for share in [0.65, 0.85]:
@@ -103,7 +103,7 @@ class ShareModeTests(unittest.TestCase):
         np.testing.assert_allclose(extreme.compensation, np.array([1 / 3, 3]) * 0.45 / 0.75)
         np.testing.assert_allclose(learned.decode([0, 0, 1]).share, 0.95)
         per_zone = ActionSpec(2, "joint_share").decode([0, 0, -1, 1])
-        np.testing.assert_allclose(per_zone.share, [0.45, 0.95])
+        np.testing.assert_allclose(per_zone.share, [0.2, 0.95])
         with self.assertRaises(ValueError):
             learned.decode([0, 0])
         for bounds in [(0.9, 0.5), (0.0, 0.9), (0.5, np.inf)]:
@@ -157,7 +157,7 @@ class ShareModeTests(unittest.TestCase):
     def test_cli_and_checkpoint_mode_mismatch(self):
         for mode in ["fixed_share", "learned_share", "joint_share"]:
             args = get_arguments(["--action_mode", mode, "--pricing_alg", "TD3_MLP"])
-            self.assertEqual(args.share_min, 0.45)
+            self.assertEqual(args.share_min, 0.2)
             self.assertEqual(args.share_max, 0.95)
             self.assertEqual(args.share_value, 0.75)
         for argv in [["--action_mode", "fixed_share"], ["--action_mode", "joint_share", "--pricing_alg", "TD3_MLP", "--share_min", "0.96"],
@@ -189,6 +189,70 @@ class ShareModeTests(unittest.TestCase):
                     other.action_spec = Spec(16, mode, **kwargs)
                 with self.assertRaisesRegex(ValueError, "does not match"):
                     load_checkpoint(other, other_env, args, 1)
+
+
+class ShareOptimizerTests(unittest.TestCase):
+    def test_share_group_has_own_lr_and_is_not_clipped(self):
+        controller, env = platform(mode="learned_share")
+        pricer = controller.pricer
+        self.assertEqual(len(pricer.actor_optim.param_groups), 1)  # default platform(): no share_lr given
+        import contextlib, io
+        from center import Platform
+        folder = ROOT / "grid_small_static" / "4" / "4"
+        td, tt = np.load(folder / "td.npy"), np.load(folder / "tt.npy")
+        with contextlib.redirect_stdout(io.StringIO()):
+            controller = Platform(td, tt, 16, option="TD3_MLP", action_mode="learned_share", T_train=1440, position_encode=8,
+                                  share_lr=5e-3, share_init=0.4, policy_delay=1,
+                                  permutation=np.load(folder / "permutation.npy"), permutation2=np.load(folder / "permutation2.npy"))
+            controller.pricer.initialize(torch.Generator().manual_seed(1))
+        pricer, spec = controller.pricer, controller.action_spec
+        self.assertEqual([g["lr"] for g in pricer.actor_optim.param_groups], [1e-4, 5e-3])
+        share = pricer.actor.share_parameters()
+        self.assertEqual(len(share), 1)
+        self.assertNotIn(id(share[0]), {id(p) for p in pricer._clipped_actor_parameters()})
+        # initial deterministic share equals share_init
+        unit = float(torch.tanh(pricer.actor.free_logit)[0])
+        self.assertAlmostEqual(spec.share_min + (unit + 1) / 2 * (spec.share_max - spec.share_min), 0.4, places=6)
+        self.assertEqual(float(torch.tanh(pricer.actor_target.free_logit)[0]), unit)
+        with self.assertRaises(ValueError):
+            Platform(td, tt, 16, option="TD3_MLP", action_mode="learned_share", T_train=1440, position_encode=8,
+                     share_init=0.99, permutation=np.load(folder / "permutation.npy"), permutation2=np.load(folder / "permutation2.npy"))
+
+    def test_share_gradient_is_unclipped_after_update(self):
+        controller, env = platform(mode="learned_share")
+        state, state2d = controller.observe(env, True)
+        for t in range(8):
+            controller.update_action(env, t, "train", True)
+            controller.buffer.push(state, state2d, controller.prices, state, state2d, 1000.0 * (t % 3), t, t + 1, False)
+        controller.pricer.policy_freq = 0
+        controller.pricer.update_policy(8, controller.buffer, 0)
+        grad = controller.pricer.actor.free_logit.grad
+        total = torch.sqrt(sum((p.grad ** 2).sum() for p in controller.pricer._clipped_actor_parameters() if p.grad is not None))
+        self.assertLessEqual(float(total), 0.0100001)  # the clipped group is bounded by MAX_GRAD_NORM_ACTOR
+        self.assertIsNotNone(grad)
+
+    def test_separate_joint_share_head(self):
+        for option in ["TD3_MLP", "TD3_CNN"]:
+            import contextlib, io
+            from center import Platform
+            folder = ROOT / "grid_small_static" / "4" / "4"
+            td, tt = np.load(folder / "td.npy"), np.load(folder / "tt.npy")
+            with contextlib.redirect_stdout(io.StringIO()):
+                controller = Platform(td, tt, 16, option=option, action_mode="joint_share", T_train=1440, position_encode=8,
+                                      kernel_size=3, stride=2, pooling=2, share_lr=2e-3, share_head_separate=True,
+                                      permutation=np.load(folder / "permutation.npy"),
+                                      permutation2=np.load(folder / "permutation2.npy"), od_permutation=True)
+                controller.pricer.initialize(torch.Generator().manual_seed(1))
+            actor = controller.pricer.actor
+            self.assertEqual(len(actor.share_parameters()), 2)
+            self.assertEqual([g["lr"] for g in controller.pricer.actor_optim.param_groups], [1e-4, 2e-3])
+            state, state2d = torch.zeros(1, 1), torch.zeros(1)
+            from test_joint_td3 import platform as make_platform
+            c2, env = make_platform(option, mode="joint_share")
+            s, s2 = c2.observe(env, True)
+            output = c2.pricer.actor(s[None], s2[None], torch.tensor([[1]]))
+            self.assertEqual(output.shape, (1, 32))
+            self.assertEqual(c2.pricer.actor.share_parameters(), [])  # default platform: shared output layer
 
 
 if __name__ == "__main__":

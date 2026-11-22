@@ -19,11 +19,21 @@ class Platform:
         veh_num = 1, demand_mean = None, demand_std = None, wage_mean = None, wage_std = None, searching = 'Gaussian', policy_delay = 30, position_encode = 64,
                   auto_correlation = False, forget = False, T_train = 10080,
                   action_mode="price_only", compensation_min=0.5, compensation_max=2.0,
-                  share_min=0.45, share_max=0.95, share_value=0.75):
+                  share_min=0.2, share_max=0.95, share_value=0.75,
+                  share_lr=None, share_init=None, share_head_separate=False):
         self.action_spec = ActionSpec(num_zone, action_mode, compensation_min, compensation_max,
                                       share_min, share_max, share_value)
         if self.action_spec.uses_joint_runner and option not in {"TD3_MLP", "TD3_CNN"}:
             raise ValueError("joint actions require TD3_MLP or TD3_CNN")
+        share_init_logit = 0.0
+        if share_init is not None:
+            if not self.action_spec.is_share_mode or self.action_spec.mode == "fixed_share":
+                raise ValueError("share_init applies to learned_share and joint_share only")
+            unit = 2.0 * (share_init - share_min) / (share_max - share_min) - 1.0
+            if not -1.0 < unit < 1.0:
+                raise ValueError("share_init must lie strictly inside (share_min, share_max)")
+            share_init_logit = float(np.arctanh(unit))
+        share_kwargs = dict(share_lr=share_lr, share_init_logit=share_init_logit, share_head_separate=share_head_separate)
         self.num_zone = num_zone
         self.history_duration = max_waiting if self.action_spec.uses_joint_runner else max(max_waiting // update_freq, 1)
         self.veh_num = veh_num
@@ -75,17 +85,17 @@ class Platform:
                                            kernel_size, stride, max(permutation[0])+1, \
                                        max(permutation[1])+1, pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                        max_len = T_train, action_mode=action_mode)
+                                        max_len = T_train, action_mode=action_mode, **share_kwargs)
             else:
                 self.pricer = TD3_CNN_deep(num_zone, self.history_duration, max_step + 1, max_waiting, \
                                            kernel_size, stride, num_zone, num_zone, \
                                        pooling = pooling, actor_lr = actor_lr, critic_lr = critic_lr,
                                        writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                           max_len = T_train, action_mode=action_mode)
+                                           max_len = T_train, action_mode=action_mode, **share_kwargs)
         else:
             self.pricer = TD3_MLP(num_zone, max_waiting, self.history_duration, max_step + 1, actor_lr = actor_lr, critic_lr = critic_lr,
                                    writer = writer, policy_delay = policy_delay, position_encode = position_encode, forget = forget,\
-                                  max_len = T_train, action_mode=action_mode)
+                                  max_len = T_train, action_mode=action_mode, **share_kwargs)
         print(option)
         if option.startswith('TD3'):
             self.buffer = Memory(size = (10*T_train)//update_freq, device=device)
