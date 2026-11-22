@@ -109,7 +109,9 @@ class ProcessAuditRecorder:
         row.update(compensation_mean=float(compensation.mean()), compensation_min=float(compensation.min()),
                    compensation_max=float(compensation.max()))
         for key in ["driver_payment_total", "pickup_cost_total", "negative_margin_order_count",
-                    "negative_margin_total", "driver_income_basis", "driver_income_denominator"]:
+                    "negative_margin_total", "driver_income_basis", "driver_income_denominator",
+                    "consumer_surplus", "driver_total_income", "online_vehicle_minutes",
+                    "driver_hourly_wage", "platform_take_rate"]:
             if key in audit:
                 row[key] = float(audit[key])
 

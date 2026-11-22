@@ -6,6 +6,8 @@ import time
 
 from visual_trace import TraceRecorder
 from process_audit import ProcessAuditRecorder
+from sampling import sample_fractional_counts, sample_poisson_counts
+from welfare import WELFARE_COLUMNS, step_welfare
 
 def price_sensitivity(pricing_multipliers, mode = False):
     # A monotonic decreasing function that describe the price elasticity
@@ -28,32 +30,25 @@ BR_LOG_COLUMNS = [
     "served_order_count",
 ]
 
-def _sample_fractional_counts(expected_counts):
-    expected_counts = np.maximum(np.asarray(expected_counts, dtype=float), 0.0)
-    base_counts = np.floor(expected_counts).astype(int)
-    residual = np.clip(expected_counts - base_counts, 0.0, 1.0)
-    return base_counts + np.random.binomial(1, residual)
+def _sample_fractional_counts(expected_counts, rng=None):
+    return sample_fractional_counts(expected_counts, rng)
 
-def _sample_poisson_counts(demand_rates):
-    demand_rates = np.asarray(demand_rates, dtype=float)
-    sampled = np.zeros(demand_rates.shape, dtype=int)
-    ind = demand_rates > 0
-    sampled[ind] = np.random.poisson(demand_rates[ind])
-    return sampled
+def _sample_poisson_counts(demand_rates, rng=None):
+    return sample_poisson_counts(demand_rates, rng)
 
-def _price_sensitive_counts(base_counts, pricing_multipliers, args):
+def _price_sensitive_counts(base_counts, pricing_multipliers, args, rng=None):
     expected = base_counts * price_sensitivity(pricing_multipliers[None, :, None], args.pricing_mode)
-    return _sample_fractional_counts(expected)
+    return _sample_fractional_counts(expected, rng)
 
 def _passenger_entry_enabled(args):
     if hasattr(args, "use_passenger_entry_br"):
         return bool(args.use_passenger_entry_br)
     return bool(getattr(args, "use_bounded_rationality", False))
 
-def _prepare_demand_batch(base_counts, pricing_multipliers, args):
+def _prepare_demand_batch(base_counts, pricing_multipliers, args, rng=None):
     if _passenger_entry_enabled(args):
-        return _sample_fractional_counts(base_counts)
-    return _price_sensitive_counts(base_counts, pricing_multipliers, args)
+        return _sample_fractional_counts(base_counts, rng)
+    return _price_sensitive_counts(base_counts, pricing_multipliers, args, rng)
 
 def _activate_demand(env, demand_batch, batch_index, pricing_multipliers):
     return env.apply_passenger_bounded_rationality(demand_batch[batch_index], pricing_multipliers)
@@ -370,6 +365,7 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
         temp_demand = _activate_demand(env, temp_demands, t % args.frequency, temp_p)
         temp_profit, temp_expense, temp_served_pass, temp_left_pass, occu_mile, occu_minute, empty_mile, empty_minute = env.step(temp_demand, temp_schedule, temp_p)
         step_br_stats = env.get_last_step_stats()
+        welfare_now = step_welfare(env)
         step_metrics = {
             "profit": temp_profit,
             "expense": temp_expense,
@@ -406,7 +402,8 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
                     step_metrics["occu_minute"], step_metrics["empty_mile"], step_metrics["empty_minute"],
                     step_metrics["reward"], step_metrics["price_mean"], step_metrics["price_min"],
                     step_metrics["price_max"]] +
-                   [step_br_stats[key] for key in BR_LOG_COLUMNS])
+                   [step_br_stats[key] for key in BR_LOG_COLUMNS] +
+                   [welfare_now[key] for key in WELFARE_COLUMNS])
         if t % 120 == 0:
             # writer.flush()
             if args.verbose:
@@ -426,7 +423,7 @@ def test(env, controller, dd_train, dd_test, T_test, args, k):
         res,
         columns=['t', 'policy', 'profit', 'expense', 'act_veh', 'served', 'left',
                  'occu_mile', 'occu_minute', 'empty_mile', 'empty_minute', 'reward',
-                 'price_mean', 'price_min', 'price_max'] + BR_LOG_COLUMNS
+                 'price_mean', 'price_min', 'price_max'] + BR_LOG_COLUMNS + WELFARE_COLUMNS
     )
     if write_test_outputs:
         res.to_csv(test_log_path, index=None)

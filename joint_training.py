@@ -1,6 +1,7 @@
 """Training and evaluation with aligned joint economic decisions."""
 import copy
 import json
+import pickle
 import random
 import time
 from contextlib import ExitStack
@@ -14,6 +15,7 @@ from joint_checkpoint import load_checkpoint, save_checkpoint
 from runner import (BR_LOG_COLUMNS, _accumulate_br_stats, _finalize_br_stats,
                     _prepare_demand_batch, _sample_poisson_counts, _zero_br_stats)
 from sim import Environment
+from welfare import step_welfare
 from process_audit import ProcessAuditRecorder
 from visual_trace import TraceRecorder
 
@@ -184,6 +186,12 @@ def evaluate_joint(env, controller, train_rates, test_rates, args):
                     trace_path /= target.stem
                 trace_recorder = stack.enter_context(TraceRecorder(trace_path, metadata, args.trace_interval))
             for t in range(len(test_rates)):
+                if t in getattr(args, "snapshot_steps", []) and write_outputs:
+                    folder = Path(args.store_res_folder) / "env_snapshots"
+                    folder.mkdir(exist_ok=True)
+                    with open(folder / "test_{}_step_{}.pkl".format(repeat, t), "wb") as handle:
+                        pickle.dump({"t": t, "repeat": repeat, "env": current.snapshot_state(),
+                                     "prices": controller.prices.clone()}, handle)
                 if action is None or t % args.frequency == 0:
                     action = controller.update_action(current, t, "test", args.od_permutation)
                 # Held-out demand is an observed count array, matching the legacy evaluator.
@@ -197,8 +205,11 @@ def evaluate_joint(env, controller, train_rates, test_rates, args):
                            price_mean=float(action.price.mean()), price_min=float(action.price.min()), price_max=float(action.price.max()))
                 row.update(current.get_last_step_stats())
                 row.update(economic_metrics(current, action))
+                row.update(step_welfare(current))
+                if action.share is not None:
+                    row["share_policy"] = action.share.copy()
                 rows.append(row)
-                metrics = {key: value for key, value in row.items() if key not in {"policy", "compensation_policy"}}
+                metrics = {key: value for key, value in row.items() if key not in {"policy", "compensation_policy", "share_policy"}}
                 if audit_recorder is not None:
                     audit_recorder.record_step(t, action.price, metrics, current)
                 if trace_recorder is not None:

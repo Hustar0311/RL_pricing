@@ -1,6 +1,8 @@
+import copy
 from collections import deque
 import numpy as np
 from economic_action import validate_control
+from sampling import sample_fractional_counts
 
 class Environment:
     def __init__(self, travel_distance, travel_time, veh_profile, num_zone, max_waiting=5, frequency=1, br_config=None):
@@ -42,8 +44,11 @@ class Environment:
         # initialization
         self.initialize_veh()
 
-        self.rand_int = list(np.random.randint(0,self.num_zone,size=100000))
-        self.rand_double = list(np.random.random(size=100000))
+        if self.env_rng_mode == "legacy":
+            self.rand_int = list(np.random.randint(0,self.num_zone,size=100000))
+            self.rand_double = list(np.random.random(size=100000))
+        else:
+            self.rand_int, self.rand_double = [], []
 
     def configure_bounded_rationality(self, config=None):
         has_individual_flags = config is not None and (
@@ -70,15 +75,37 @@ class Environment:
             seed = getattr(config, "seed", None)
         self.br_random_seed = seed
         seed_sequence = np.random.SeedSequence(seed)
-        passenger_seed, driver_seed = seed_sequence.spawn(2)
+        # children 0 and 1 are identical to spawn(2); child 2 only exists for env_rng="isolated"
+        passenger_seed, driver_seed, env_seed = seed_sequence.spawn(3)
         self.passenger_rng = np.random.default_rng(passenger_seed)
         self.driver_rng = np.random.default_rng(driver_seed)
+        self.env_rng_mode = getattr(config, "env_rng", "legacy")
+        if self.env_rng_mode not in ("legacy", "isolated"):
+            raise ValueError("env_rng must be legacy or isolated")
+        self.env_rng = np.random.default_rng(env_seed) if self.env_rng_mode == "isolated" else None
+        self.step_index = 0
+        # driver decision inertia: driver k re-decides only when (step + k) % interval == 0
+        self.driver_decision_interval = int(getattr(config, "driver_decision_interval", 1))
+        self.driver_switch_cost = float(getattr(config, "driver_switch_cost", 0.0))
+        if self.driver_decision_interval < 1 or self.driver_switch_cost < 0:
+            raise ValueError("driver_decision_interval must be >= 1 and driver_switch_cost >= 0")
+        # passenger entry calibration: "none" (legacy logit) or "anchor"
+        self.passenger_calibration = getattr(config, "passenger_calibration", "none")
+        if self.passenger_calibration not in ("none", "anchor"):
+            raise ValueError("passenger_calibration must be none or anchor")
+        self.target_demand_elasticity = float(getattr(config, "target_demand_elasticity", -1.0))
+        self.passenger_anchor_utility = float(getattr(config, "passenger_anchor_utility", 1.0))
+        self.passenger_anchor_price = float(getattr(config, "passenger_anchor_price", 1.0))
 
         self.beta_passenger = float(getattr(config, "beta_passenger", 1.0))
         self.beta_driver = float(getattr(config, "beta_driver", 1.0))
         self.passenger_base_utility = float(getattr(config, "passenger_base_utility", 2.0))
         self.passenger_price_sensitivity = float(getattr(config, "passenger_price_sensitivity", 1.0))
         self.passenger_wait_sensitivity = float(getattr(config, "passenger_wait_sensitivity", 0.1))
+        if self.passenger_calibration == "anchor":
+            if self.beta_passenger <= 1e-8:
+                raise ValueError("anchor calibration needs beta_passenger > 0")
+            self._configure_anchor_calibration()
 
         self._pending_passenger_stats = None
         self._pending_passenger_audit = None
@@ -117,21 +144,44 @@ class Environment:
         z = np.clip(utility / beta, -60, 60)
         return 1.0 / (1.0 + np.exp(-z))
 
+    def _configure_anchor_calibration(self):
+        """Entry = D * sigmoid((a - b p - gamma rho^2)/beta) / sigmoid(c/beta) with a - b p0 = c.
+
+        b is chosen so the entry elasticity at (p0, rho=0) equals the target:
+        b = -e * beta / (p0 * (1 - sigmoid(c / beta))); for beta = 1 this is -e / (p0 (1 - sigmoid(c))).
+        """
+        c, p0, beta = self.passenger_anchor_utility, self.passenger_anchor_price, self.beta_passenger
+        if p0 <= 0 or self.target_demand_elasticity >= 0:
+            raise ValueError("anchor calibration needs p0 > 0 and a negative target elasticity")
+        anchor_prob = float(self._sigmoid_probability(c, beta))
+        self.calibrated_price_sensitivity = -self.target_demand_elasticity * beta / (p0 * (1.0 - anchor_prob))
+        self.calibrated_base_utility = c + self.calibrated_price_sensitivity * p0
+        self.calibration_anchor_probability = anchor_prob
+
     def _passenger_decision_context(self, price_multiplier):
         waiting_by_origin = np.sum(self.pass_count, axis=(0, 2))
         idle_supply = self.veh_count.copy()
         congestion = waiting_by_origin / (idle_supply + 1.0)
-        utility = (
-            self.passenger_base_utility
-            - self.passenger_price_sensitivity * np.asarray(price_multiplier)
-            - self.passenger_wait_sensitivity * congestion ** 2
-        )
+        if self.passenger_calibration == "anchor":
+            utility = (
+                self.calibrated_base_utility
+                - self.calibrated_price_sensitivity * np.asarray(price_multiplier)
+                - self.passenger_wait_sensitivity * congestion ** 2
+            )
+            enter_probability = self._sigmoid_probability(utility, self.beta_passenger) / self.calibration_anchor_probability
+        else:
+            utility = (
+                self.passenger_base_utility
+                - self.passenger_price_sensitivity * np.asarray(price_multiplier)
+                - self.passenger_wait_sensitivity * congestion ** 2
+            )
+            enter_probability = self._sigmoid_probability(utility, self.beta_passenger)
         return {
             "waiting_by_origin": waiting_by_origin.astype(float),
             "idle_supply": idle_supply.astype(float),
             "congestion_proxy": congestion.astype(float),
             "passenger_utility": utility.astype(float),
-            "passenger_enter_probability": self._sigmoid_probability(utility, self.beta_passenger),
+            "passenger_enter_probability": enter_probability,
         }
 
     def passenger_enter_probability(self, price_multiplier):
@@ -144,7 +194,11 @@ class Environment:
         context = self._passenger_decision_context(price_multiplier)
         if self.use_passenger_entry_br:
             enter_prob = context["passenger_enter_probability"]
-            actual_demand = self.passenger_rng.binomial(potential_demand, enter_prob[:, None])
+            if self.passenger_calibration == "anchor":
+                # the calibrated entry ratio may exceed 1 at low prices, as in the legacy price rule
+                actual_demand = sample_fractional_counts(potential_demand * enter_prob[:, None], self.passenger_rng)
+            else:
+                actual_demand = self.passenger_rng.binomial(potential_demand, enter_prob[:, None])
         else:
             enter_prob = np.ones(self.num_zone, dtype=float)
             actual_demand = potential_demand
@@ -164,9 +218,17 @@ class Environment:
         }
         return actual_demand.astype(int)
 
-    def driver_online_probability(self, driver_profile):
+    def driver_online_probability(self, driver_profile, switch_offset=0.0):
         utility = self.avg_profit - driver_profile
+        if switch_offset:
+            utility = utility + switch_offset
         return float(self._sigmoid_probability(utility, self.beta_driver))
+
+    def _driver_decides(self, vehicle):
+        return self.driver_decision_interval == 1 or (self.step_index + vehicle.id) % self.driver_decision_interval == 0
+
+    def _hard_online(self, profile, switch_offset):
+        return profile <= (self.avg_profit + switch_offset if switch_offset else self.avg_profit)
 
     def get_last_step_stats(self):
         return dict(self.last_step_stats)
@@ -407,6 +469,14 @@ class Environment:
         avg_profit_for_driver_decisions = float(self.avg_profit)
         reposition_origins = []
         reposition_destinations = []
+        switch_to_offline = 0
+        switch_to_online = 0
+        isolated = self.env_rng_mode == "isolated"
+        if isolated:
+            # fixed number of draws per step, indexed by vehicle id, so that streams stay aligned
+            # across counterfactual arms whose vehicle states differ
+            move_u = self.env_rng.random((3, len(self.veh_list)))
+            decision_u = self.driver_rng.random(len(self.veh_list)) if self.use_driver_online_br else None
         for v in self.veh_list:
             ## vehicle movement
             if v.state == 1:
@@ -427,15 +497,20 @@ class Environment:
                     })
             ## vehicles quit/reposition/rejoin
             elif v.state == 0:
-                if self.use_driver_online_br:
-                    online_probability = self.driver_online_probability(v.profile)
-                    stays_online = self.driver_rng.random() < online_probability
+                if not self._driver_decides(v):
+                    stays_online = True
                 else:
-                    online_probability = float(v.profile <= self.avg_profit)
-                    stays_online = v.profile <= self.avg_profit
-                driver_probability[v.id] = online_probability
-                driver_outcome[v.id] = float(stays_online)
+                    if self.use_driver_online_br:
+                        online_probability = self.driver_online_probability(v.profile, self.driver_switch_cost)
+                        draw = decision_u[v.id] if isolated else self.driver_rng.random()
+                        stays_online = draw < online_probability
+                    else:
+                        stays_online = self._hard_online(v.profile, self.driver_switch_cost)
+                        online_probability = float(stays_online)
+                    driver_probability[v.id] = online_probability
+                    driver_outcome[v.id] = float(stays_online)
                 if not stays_online:
+                    switch_to_offline += 1
                     old_loc = v.loc
                     v.state = 2
                     v.trace_from_zone = old_loc
@@ -451,11 +526,15 @@ class Environment:
                         "zone": int(old_loc),
                     })
                 else:
-                    if len(self.rand_double) == 0:
-                        self.rand_double = list(np.random.random(size=100000))
                     old_loc = v.loc
-                    new_loc, remaining_time = v.reposition(self.travel_time, self.rand_double.pop(),\
-                                                           (self.rand_double.pop() < reposition_probabilities[v.loc]).argmax())
+                    if isolated:
+                        new_loc, remaining_time = v.reposition(self.travel_time, move_u[0, v.id],
+                                                               (move_u[1, v.id] < reposition_probabilities[v.loc]).argmax())
+                    else:
+                        if len(self.rand_double) == 0:
+                            self.rand_double = list(np.random.random(size=100000))
+                        new_loc, remaining_time = v.reposition(self.travel_time, self.rand_double.pop(),\
+                                                               (self.rand_double.pop() < reposition_probabilities[v.loc]).argmax())
                     if v.loc != new_loc:
                         move_expense = self.alpha2 * self.travel_distance[v.loc, new_loc] + self.beta2 * self.travel_time[v.loc, new_loc]
                         tot_expense += move_expense
@@ -481,23 +560,28 @@ class Environment:
                             "duration": float(remaining_time),
                         })
             elif v.state == 2:
-                if self.use_driver_online_br:
-                    online_probability = self.driver_online_probability(v.profile)
-                    goes_online = self.driver_rng.random() < online_probability
+                if not self._driver_decides(v):
+                    goes_online = False
                 else:
-                    online_probability = float(v.profile <= self.avg_profit)
-                    goes_online = v.profile <= self.avg_profit
-                driver_probability[v.id] = online_probability
-                driver_outcome[v.id] = float(goes_online)
+                    if self.use_driver_online_br:
+                        online_probability = self.driver_online_probability(v.profile, -self.driver_switch_cost)
+                        draw = decision_u[v.id] if isolated else self.driver_rng.random()
+                        goes_online = draw < online_probability
+                    else:
+                        goes_online = self._hard_online(v.profile, -self.driver_switch_cost)
+                        online_probability = float(goes_online)
+                    driver_probability[v.id] = online_probability
+                    driver_outcome[v.id] = float(goes_online)
                 if goes_online:
+                    switch_to_online += 1
                     v.state = 0
                     v.waiting = 0
-                    v.loc = self.rand_int.pop()
+                    v.loc = min(int(move_u[2, v.id] * self.num_zone), self.num_zone - 1) if isolated else self.rand_int.pop()
                     v.trace_from_zone = v.loc
                     v.trace_to_zone = v.loc
                     v.trace_total_time = 0
                     v.trace_movement_type = "online"
-                    if len(self.rand_int) == 0:
+                    if not isolated and len(self.rand_int) == 0:
                         self.rand_int = list(np.random.randint(0, self.num_zone, size = 100000))
                     self.veh_count[v.loc] += 1
                     self.veh_queue[v.loc].append(v)
@@ -567,7 +651,11 @@ class Environment:
             "pickup_cost_total": float(pickup_cost_total),
             "negative_margin_order_count": int(negative_margin_order_count),
             "negative_margin_total": float(negative_margin_total),
+            "driver_switch_count": float(switch_to_offline + switch_to_online),
+            "driver_switch_to_offline_count": float(switch_to_offline),
+            "driver_switch_to_online_count": float(switch_to_online),
             "driver_income_basis": float(income_basis),
+            **self._welfare_audit(passenger_audit, tot_profit, driver_payment_total),
             "driver_income_denominator": float(income_denominator),
             "driver_income_window": np.asarray(self.avg_profits, dtype=float).copy(),
             "joint_action_enabled": self.action_mode != "price_only",
@@ -607,7 +695,55 @@ class Environment:
             "vehicle_events": vehicle_events,
         }
 
+        self.step_index += 1
         return tot_profit, tot_expense, served_pass, left_pass, occu_mile, occu_minute, empty_mile, empty_minute
+
+    def snapshot_state(self):
+        """Deep copy of the complete simulator state (vehicles, queues, histories and generators)."""
+        return copy.deepcopy(self.__dict__)
+
+    def restore_state(self, state):
+        restored = copy.deepcopy(state)
+        self.__dict__.clear()
+        self.__dict__.update(restored)
+
+    def reseed_streams(self, seed, step):
+        """Give every random stream a state that depends only on (seed, step).
+
+        Counterfactual arms that start from the same snapshot then see identical random numbers at
+        every minute regardless of how their vehicle states diverged.  Isolated mode only.
+        """
+        if self.env_rng_mode != "isolated":
+            raise ValueError("reseed_streams requires env_rng='isolated'")
+        children = np.random.SeedSequence([int(seed), int(step)]).spawn(3)
+        self.passenger_rng, self.driver_rng, self.env_rng = [np.random.default_rng(c) for c in children]
+
+    def passenger_consumer_surplus(self, utility, potential_by_origin):
+        """Logit inclusive-value surplus beta * sum_i M_i * log(1 + exp(U_i / beta)).
+
+        The same formula is used whether or not the passenger-entry BR switch is on: it
+        always evaluates the configured entry-utility parameters (a measuring convention,
+        not a statement that passengers behave stochastically).  M_i is the potential demand
+        from origin i, U_i the entry utility given the posted price and the congestion proxy.
+        """
+        utility = np.asarray(utility, dtype=float)
+        potential = np.asarray(potential_by_origin, dtype=float)
+        beta = self.beta_passenger
+        if beta <= 1e-8:
+            return float(np.sum(potential * np.maximum(utility, 0.0)))
+        return float(beta * np.sum(potential * np.logaddexp(0.0, utility / beta)))
+
+    def _welfare_audit(self, passenger_audit, revenue, driver_payment_total):
+        potential_by_origin = np.sum(passenger_audit["potential_demand_matrix"], axis=1)
+        online_minutes = float(self.active_veh)  # one step is one minute; all non-offline vehicles
+        return {
+            "consumer_surplus": self.passenger_consumer_surplus(passenger_audit["passenger_utility"], potential_by_origin),
+            "passenger_revenue_total": float(revenue),
+            "driver_total_income": float(driver_payment_total),
+            "online_vehicle_minutes": online_minutes,
+            "driver_hourly_wage": float(driver_payment_total) / online_minutes * 60.0 if online_minutes > 0 else float("nan"),
+            "platform_take_rate": 1.0 - float(driver_payment_total) / float(revenue) if revenue > 0 else float("nan"),
+        }
 
     def reset(self):
         self.pass_count *= 0

@@ -125,6 +125,15 @@ def write_metadata(args, result_folder):
                 if is_enabled
             } if mechanisms else None,
         },
+        "market_rules": {
+            "passenger_calibration": args.passenger_calibration,
+            "target_demand_elasticity": args.target_demand_elasticity if args.passenger_calibration != 'none' else None,
+            "passenger_anchor_utility": args.passenger_anchor_utility if args.passenger_calibration != 'none' else None,
+            "passenger_anchor_price": args.passenger_anchor_price if args.passenger_calibration != 'none' else None,
+            "driver_decision_interval": args.driver_decision_interval,
+            "driver_switch_cost": args.driver_switch_cost,
+            "env_rng": args.env_rng,
+        },
         "process_audit_enabled": bool(args.enable_process_audit),
         "event_order": [
             "match_existing_waiting_requests",
@@ -204,7 +213,7 @@ def write_runtime_summary(result_dir, runtime_info, args):
     with open(os.path.join(result_dir, "runtime_summary.json"), "w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, ensure_ascii=False)
 
-def get_arguments(argv):
+def build_parser():
     parser = argparse.ArgumentParser(description='SpatioTemporal Pricing')
     # Simulation settings
     parser.add_argument('-d', '--data_folder',
@@ -283,6 +292,23 @@ def get_arguments(argv):
                         help='price coefficient in the passenger entry utility')
     parser.add_argument('--passenger_wait_sensitivity', type=float, default=0.1,
                         help='congestion coefficient in the passenger entry utility')
+    parser.add_argument('--passenger_calibration', choices=['none', 'anchor'], default='none',
+                        help='anchor: entry = D*sigmoid(a - b p - gamma rho^2)/sigmoid(c) with a - b p0 = c and the '
+                             'slope b set so the entry elasticity at p0 equals --target_demand_elasticity')
+    parser.add_argument('--target_demand_elasticity', type=float, default=-1.0,
+                        help='entry-demand elasticity at the anchor price (anchor calibration)')
+    parser.add_argument('--passenger_anchor_utility', type=float, default=1.0,
+                        help='anchor utility c (anchor calibration)')
+    parser.add_argument('--passenger_anchor_price', type=float, default=1.0,
+                        help='anchor price p0 (anchor calibration)')
+    parser.add_argument('--driver_decision_interval', type=int, default=1,
+                        help='driver k re-decides online/offline only when (t + k) mod T == 0; 1 keeps the legacy every-minute rule')
+    parser.add_argument('--driver_switch_cost', type=float, default=0.0,
+                        help='utility subtracted when a driver changes between online and offline')
+    parser.add_argument('--env_rng', choices=['legacy', 'isolated'], default='legacy',
+                        help='isolated: the environment owns a numpy Generator instead of drawing from the global random lists')
+    parser.add_argument('--snapshot_steps', type=str, default='',
+                        help='comma-separated test minutes at which evaluation saves a simulator snapshot (joint runner)')
     parser.add_argument('--br_random_seed', type=int, default=None,
                         help='random seed for bounded rationality choices; defaults to --seed')
     parser.add_argument('--disable_process_audit', dest='enable_process_audit', action='store_false', default=True,
@@ -301,11 +327,29 @@ def get_arguments(argv):
                         help='record one visual trace frame every N simulation steps')
     parser.add_argument('--trace_only', action='store_true', default=False,
                         help='when existing test logs are present, rerun only the traced test without overwriting logs')
+    return parser
+
+
+def get_arguments(argv):
+    parser = build_parser()
     args = normalize_mechanism_flags(parser.parse_args(argv))
     try:
         ActionSpec.from_args(args, 1)
     except ValueError as exc:
         parser.error(str(exc))
+    if args.passenger_calibration == 'anchor':
+        if not args.use_passenger_entry_br:
+            parser.error('passenger_calibration anchor requires passenger-entry bounded rationality')
+        if args.beta_passenger <= 0 or args.target_demand_elasticity >= 0 or args.passenger_anchor_price <= 0:
+            parser.error('anchor calibration needs beta_passenger > 0, a negative target elasticity and p0 > 0')
+    if args.driver_decision_interval < 1 or args.driver_switch_cost < 0:
+        parser.error('driver_decision_interval must be >= 1 and driver_switch_cost >= 0')
+    try:
+        args.snapshot_steps = [int(v) for v in str(args.snapshot_steps).split(',') if v.strip()]
+    except ValueError:
+        parser.error('snapshot_steps must be comma-separated integers')
+    if args.snapshot_steps and args.action_mode == 'price_only':
+        parser.error('snapshot_steps is supported by the joint runner (non price_only action modes)')
     if args.frequency <= 0 or args.batch_size <= 0 or args.n_epochs <= 0 or args.resume < 0:
         parser.error('frequency, batch_size and n_epochs must be positive; resume must be nonnegative')
     if args.action_mode != 'price_only':
@@ -358,6 +402,12 @@ if __name__ == '__main__':
         else:
             settings_tag += '_s{}_{}'.format(tag_float(args.share_min), tag_float(args.share_max))
         settings_tag += '_f{}'.format(args.frequency)
+    if args.passenger_calibration != 'none':
+        settings_tag += '_cal{}_e{}'.format(args.passenger_calibration, tag_float(args.target_demand_elasticity))
+    if args.driver_decision_interval != 1 or args.driver_switch_cost != 0:
+        settings_tag += '_dT{}_sc{}'.format(args.driver_decision_interval, tag_float(args.driver_switch_cost))
+    if args.env_rng != 'legacy':
+        settings_tag += '_rng' + args.env_rng
     if args.deterministic:
         settings_tag += "_deterministic"
     hyperp_tag = str(args.batch_size) + "_" + str(args.actor_lr) + "_" + str(args.critic_lr) + "_" + str(args.kernel_size)

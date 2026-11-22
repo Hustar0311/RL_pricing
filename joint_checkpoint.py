@@ -7,6 +7,13 @@ import numpy as np
 import torch
 
 
+OPTIONAL_CONTRACT_DEFAULTS = {
+    "env_rng": "legacy", "passenger_calibration": "none", "target_demand_elasticity": -1.0,
+    "passenger_anchor_utility": 1.0, "passenger_anchor_price": 1.0,
+    "driver_decision_interval": 1, "driver_switch_cost": 0.0,
+}
+
+
 def contract(controller, args):
     keys = ["pricing_alg", "frequency", "position_encode", "od_permutation", "auto_correlation",
             "searching", "policy_delay", "forget", "seed", "br_random_seed", "data_folder",
@@ -14,8 +21,15 @@ def contract(controller, args):
             "use_passenger_entry_br", "use_driver_online_br",
             "beta_passenger", "beta_driver", "passenger_base_utility", "passenger_price_sensitivity",
             "passenger_wait_sensitivity"]
+    configuration = {key: getattr(args, key, None) for key in keys}
+    # market-rule switches enter the contract only when they differ from the legacy default, so
+    # checkpoints written before these options existed keep loading under default settings
+    for key, default in OPTIONAL_CONTRACT_DEFAULTS.items():
+        value = getattr(args, key, default)
+        if value != default:
+            configuration[key] = value
     return {"action_space": controller.action_spec.metadata(), "time_period": controller.pricer.actor.max_len,
-            "configuration": {key: getattr(args, key, None) for key in keys}}
+            "configuration": configuration}
 
 
 def save_checkpoint(controller, env, args, epoch):
@@ -69,3 +83,23 @@ def load_checkpoint(controller, env, args, epoch, training=True):
         if args.device == "cuda" and payload["rng"]["cuda"]:
             torch.cuda.set_rng_state_all(payload["rng"]["cuda"])
     return payload
+
+
+def load_policy_only(controller, path, device="cpu"):
+    """Load actor/critic weights for offline evaluation under a different market.
+
+    Only the action-space contract is enforced; training-time market rules (BR switches,
+    calibration, driver inertia) are deliberately not compared because counterfactual
+    evaluation changes them on purpose.
+    """
+    payload = torch.load(str(path), map_location="cpu", weights_only=False)
+    if payload.get("version") != 1:
+        raise ValueError("unsupported joint checkpoint version")
+    if payload["contract"]["action_space"] != controller.action_spec.metadata():
+        raise ValueError("checkpoint action space does not match the evaluation controller")
+    controller.device = device
+    for name in ["actor", "actor_target", "critic", "critic_target"]:
+        getattr(controller.pricer, name).to(device)
+        getattr(controller.pricer, name).load_state_dict(payload["models"][name])
+    controller.pricer.eval()
+    return payload["contract"]
