@@ -28,11 +28,12 @@ from sim import Environment  # noqa: E402
 from welfare import step_welfare  # noqa: E402
 
 METRICS = ["served", "revenue", "net_profit", "driver_income_signal", "online_vehicles", "entered",
-           "driver_total_income", "consumer_surplus", "negative_margin_orders", "switches"]
+           "driver_total_income", "consumer_surplus", "negative_margin_orders", "switches",
+           "left", "wait_minutes", "pickup_minutes", "empty_minutes"]
 # metrics that accumulate over minutes (the others are read at the horizon minute)
 WARMUP_OFFSET = 10_000_000  # warm-up minutes use step ids disjoint from the evaluation minutes
 CUMULATIVE = {"served", "revenue", "net_profit", "entered", "driver_total_income", "consumer_surplus",
-              "negative_margin_orders", "switches"}
+              "negative_margin_orders", "switches", "left", "wait_minutes", "pickup_minutes", "empty_minutes"}
 
 
 # ----------------------------------------------------------------------------- scenario / policy
@@ -83,9 +84,9 @@ class Policy:
 
     def decide(self, env, t):
         if self.constant is not None:
-            price, share = self.constant
-            price = np.full(self.spec.num_zone, float(price))
-            share_vec = np.full(self.spec.num_zone, float(share))
+            price, share = self.constant(t) if callable(self.constant) else self.constant
+            price = np.broadcast_to(np.asarray(price, dtype=float), (self.spec.num_zone,)).copy()
+            share_vec = np.broadcast_to(np.asarray(share, dtype=float), (self.spec.num_zone,)).copy()
             return EconomicAction(price, price * (share_vec / self.spec.delta), share_vec)
         with torch.no_grad():
             return self.controller.update_action(env, t, "test", self.od_permutation)
@@ -122,9 +123,10 @@ def load_policy(checkpoint_dir, epoch, scenario, device="cpu"):
 
 
 def constant_policy(scenario, price=1.0, share=0.75, frequency=1):
+    """price/share may be scalars, per-zone vectors, or a callable t -> (price, share) (time-varying schedules)."""
     with contextlib.redirect_stdout(io.StringIO()):
         controller = Platform(scenario.td, scenario.tt, scenario.num_zone, option="TD3_MLP", action_mode="fixed_share",
-            share_value=share, update_freq=frequency, veh_num=len(scenario.vp), position_encode=8, T_train=1440,
+            share_value=0.75, update_freq=frequency, veh_num=len(scenario.vp), position_encode=8, T_train=1440,
             permutation=scenario.permutation, permutation2=scenario.permutation2, od_permutation=True)
     return Policy(controller, frequency, True, constant=(price, share))
 
@@ -230,11 +232,13 @@ def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=N
         demand = _prepare_demand_batch((test_counts[t:t + 1] * factor), price, market, demand_rng)[0]
         _, schedule = policy.controller.batch_matching(np.sum(env.pass_count, axis=(0, 2)), env.veh_count)
         actual = env.apply_passenger_bounded_rationality(demand, price)
-        revenue, expense, served = env.step(actual, schedule, price, comp)[:3]
-        stats, welfare = env.get_last_step_stats(), step_welfare(env)
+        result = env.step(actual, schedule, price, comp)
+        revenue, expense, served, left = result[:4]
+        stats, welfare, audit = env.get_last_step_stats(), step_welfare(env), env.get_last_step_audit()
+        pickup = float(np.sum(audit["travel_time_matrix"][audit["service_vehicle_origin"], audit["service_passenger_origin"]]))
         out[k] = [served, revenue, revenue - expense, env.avg_profit, env.active_veh, stats["actual_passenger_count"],
                   welfare["driver_total_income"], welfare["consumer_surplus"], welfare["negative_margin_order_count"],
-                  env.get_last_step_audit()["driver_switch_count"]]
+                  audit["driver_switch_count"], left, float(np.sum(audit["service_wait_index"])), pickup, result[7]]
     return out
 
 

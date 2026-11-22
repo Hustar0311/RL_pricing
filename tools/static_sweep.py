@@ -25,6 +25,7 @@ from tools import rollout_lib as lib  # noqa: E402
 
 PRICES = [0.8, 0.9, 1.0, 1.1, 1.2]
 SHARES = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+REFERENCE_POINT = (1.0, 0.75)  # (p, s) whose driver hourly wage defines --driver_hourly_floor auto
 MARKET = dict(use_passenger_entry_br=True, use_driver_online_br=True, passenger_calibration="anchor",
               driver_decision_interval=30)
 OUTPUTS = ["profit", "hourly_wage", "consumer_surplus", "served", "online_vehicles", "take_rate"]
@@ -47,7 +48,7 @@ def run_point(job):
     kind, p, s, seed = job
     scenario, market = _CONTEXT["scenario"], _CONTEXT["market"]
     policy = lib.constant_policy(scenario, p, s) if kind == "grid" else _CONTEXT["policy_factory"]()
-    state, held, t0 = lib.build_start_state(scenario, policy, market, 0, seed)
+    state, held, t0 = lib.build_start_state(scenario, policy, market, 0, seed, warmup_minutes=_CONTEXT.get("warmup", 1440))
     env = lib.make_environment(scenario, market, seed, policy.frequency)
     env.restore_state(state)
     trace = lib.simulate(env, policy, scenario.dd_test, 0, len(scenario.dd_test), market, seed, None, held)
@@ -63,8 +64,10 @@ def aggregate(results):
                                        for k in OUTPUTS} for (p, s), rows in table.items()}
 
 
-def optimum(grid, prices, shares):
-    best = max(grid, key=lambda key: grid[key]["profit"]["mean"])
+def optimum(grid, prices, shares, wage_floor=None):
+    """Best profit point; with a driver hourly-wage floor only grid points whose mean wage >= floor qualify."""
+    keys = [k for k in grid if wage_floor is None or grid[k]["hourly_wage"]["mean"] >= wage_floor]
+    best = max(keys, key=lambda key: grid[key]["profit"]["mean"])
     p, s = (float(x) for x in best.split("|"))
     interior = prices[0] < p < prices[-1] and shares[0] < s < shares[-1]
     return p, s, interior, grid[best]["profit"]["mean"]
@@ -101,6 +104,13 @@ def main(argv=None):
     parser.add_argument("--replicates", type=int, default=5)
     parser.add_argument("--seed", type=int, default=2000)
     parser.add_argument("--workers", type=int, default=12)
+    parser.add_argument("--market", default="", help="market overrides k=v,... (JSON values), e.g. passenger_wait_sensitivity=0.5")
+    parser.add_argument("--prices", nargs="+", type=float, default=PRICES)
+    parser.add_argument("--shares", nargs="+", type=float, default=SHARES)
+    parser.add_argument("--warmup", type=int, default=1440)
+    parser.add_argument("--driver_hourly_floor", default=None,
+                        help="W-bar: a number, or 'auto' = driver hourly wage at p=1, s=0.75 in the same protocol; "
+                             "only grid points with wage >= W-bar are eligible for the constrained optimum")
     parser.add_argument("--checkpoint_dir")
     parser.add_argument("--epoch", type=int)
     parser.add_argument("--grid_json", help="existing sweep result to compare the checkpoint with")
@@ -108,8 +118,12 @@ def main(argv=None):
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)
     scenario = lib.Scenario(args.scenario)
-    market = lib.market_namespace({}, MARKET)
-    _CONTEXT.update(scenario=scenario, market=market)
+    overrides = dict(MARKET)
+    for item in filter(None, args.market.split(",")):
+        key, _, value = item.partition("=")
+        overrides[key] = json.loads(value) if value[:1] in "0123456789-.tfn[\"" else value
+    market = lib.market_namespace({}, overrides)
+    _CONTEXT.update(scenario=scenario, market=market, warmup=args.warmup)
     seeds = [args.seed + r for r in range(args.replicates)]
 
     if args.checkpoint_dir:
@@ -135,19 +149,30 @@ def main(argv=None):
         (out / "{}_checkpoint_epoch{}.json".format(args.label, args.epoch)).write_text(json.dumps(record, indent=2, default=float), encoding="utf-8")
         return record
 
-    jobs = [("grid", p, s, seed) for p in PRICES for s in SHARES for seed in seeds]
+    prices, shares = list(args.prices), list(args.shares)
+    if args.driver_hourly_floor is not None and (REFERENCE_POINT[0] not in prices or REFERENCE_POINT[1] not in shares):
+        shares = sorted(set(shares) | {REFERENCE_POINT[1]})
+        prices = sorted(set(prices) | {REFERENCE_POINT[0]})
+    jobs = [("grid", p, s, seed) for p in prices for s in shares for seed in seeds]
     with mp.get_context("fork").Pool(args.workers) as pool:
         results = pool.map(run_point, jobs, chunksize=1)
     grid = aggregate(results)
-    p, s, interior, best_profit = optimum(grid, PRICES, SHARES)
-    doc = {"scenario": args.scenario, "market": MARKET, "replicates": args.replicates, "seeds": seeds,
-           "prices": PRICES, "shares": SHARES, "grid": grid,
+    p, s, interior, best_profit = optimum(grid, prices, shares)
+    doc = {"scenario": args.scenario, "market": overrides, "replicates": args.replicates, "seeds": seeds,
+           "prices": prices, "shares": shares, "grid": grid, "warmup": args.warmup,
            "optimum": {"p": p, "s": s, "profit": best_profit, "interior": bool(interior)}}
+    if args.driver_hourly_floor is not None:
+        floor = (grid["{:g}|{:g}".format(*REFERENCE_POINT)]["hourly_wage"]["mean"]
+                 if args.driver_hourly_floor == "auto" else float(args.driver_hourly_floor))
+        fp, fs, finterior, fprofit = optimum(grid, prices, shares, floor)
+        doc["wage_floor"] = {"floor": floor, "p": fp, "s": fs, "profit": fprofit, "interior": bool(finterior),
+                             "feasible_points": sum(v["hourly_wage"]["mean"] >= floor for v in grid.values())}
+        print("wage floor {:.2f}: best feasible p={:g} s={:g} profit={:.0f} interior={}".format(floor, fp, fs, fprofit, finterior))
     (out / "{}_grid.json".format(args.label)).write_text(json.dumps(doc, indent=2), encoding="utf-8")
-    heatmap(grid, PRICES, SHARES, "{}: profit, best p={:g}, s={:g}".format(args.label, p, s), out / "{}_profit_heatmap.png".format(args.label))
-    print("{:>5} ".format("s\\p") + " ".join("{:>9g}".format(x) for x in PRICES))
-    for sh in SHARES:
-        print("{:>5g} ".format(sh) + " ".join("{:>9.0f}".format(grid["{:g}|{:g}".format(pp, sh)]["profit"]["mean"]) for pp in PRICES))
+    heatmap(grid, prices, shares, "{}: profit, best p={:g}, s={:g}".format(args.label, p, s), out / "{}_profit_heatmap.png".format(args.label))
+    print("{:>5} ".format("s\\p") + " ".join("{:>9g}".format(x) for x in prices))
+    for sh in shares:
+        print("{:>5g} ".format(sh) + " ".join("{:>9.0f}".format(grid["{:g}|{:g}".format(pp, sh)]["profit"]["mean"]) for pp in prices))
     print("optimum p={:g} s={:g} profit={:.0f} interior={}".format(p, s, best_profit, interior))
     return doc
 
