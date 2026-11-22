@@ -18,12 +18,14 @@ class Platform:
         kernel_size = 3, stride = 1, pooling = 2, device = 'cpu', actor_lr=0.0001, critic_lr=0.001, update_freq = 1, writer = None, od_permutation = True,
         veh_num = 1, demand_mean = None, demand_std = None, wage_mean = None, wage_std = None, searching = 'Gaussian', policy_delay = 30, position_encode = 64,
                   auto_correlation = False, forget = False, T_train = 10080,
-                  action_mode="price_only", compensation_min=0.5, compensation_max=2.0):
-        self.action_spec = ActionSpec(num_zone, action_mode, compensation_min, compensation_max)
-        if action_mode == "joint" and option not in {"TD3_MLP", "TD3_CNN"}:
+                  action_mode="price_only", compensation_min=0.5, compensation_max=2.0,
+                  share_min=0.45, share_max=0.95, share_value=0.75):
+        self.action_spec = ActionSpec(num_zone, action_mode, compensation_min, compensation_max,
+                                      share_min, share_max, share_value)
+        if self.action_spec.uses_joint_runner and option not in {"TD3_MLP", "TD3_CNN"}:
             raise ValueError("joint actions require TD3_MLP or TD3_CNN")
         self.num_zone = num_zone
-        self.history_duration = max_waiting if action_mode == "joint" else max(max_waiting // update_freq, 1)
+        self.history_duration = max_waiting if self.action_spec.uses_joint_runner else max(max_waiting // update_freq, 1)
         self.veh_num = veh_num
         if demand_mean is not None:
             self.demand_mean = demand_mean
@@ -89,7 +91,7 @@ class Platform:
             self.buffer = Memory(size = (10*T_train)//update_freq, device=device)
         else:
             self.buffer = Memory(size = T_train//update_freq * 2, device=device)
-        if action_mode == "joint":
+        if self.action_spec.uses_joint_runner:
             self.buffer = JointMemory(max(10, (10*T_train)//update_freq), self.action_spec.dimension, device)
 
         self.prices = torch.zeros((1, self.action_spec.dimension))
@@ -131,11 +133,11 @@ class Platform:
             env.pass_count, env.veh_count, env.get_ongoing_veh(),
             env.pricing_multipliers[:duration], env.avg_profit, env.zone_profit)
         parts = [vehicles, ongoing.flatten(), prices.flatten(), np.array([income]), zones.flatten()]
-        if self.action_spec.mode == "joint":
+        if self.action_spec.uses_joint_runner:
             q = env.compensation_multipliers[:duration]
             # Histories may contain q=p during neutral warmup; do not clip state.
-            q = (np.log(q) - np.log(self.action_spec.compensation_min)) / (
-                np.log(self.action_spec.compensation_max) - np.log(self.action_spec.compensation_min))
+            q_low, q_high = self.action_spec.q_bounds()
+            q = (np.log(q) - np.log(q_low)) / (np.log(q_high) - np.log(q_low))
             parts.append(q.flatten())
         if self.option.endswith("CNN"):
             state2d = torch.as_tensor(counts, dtype=torch.float32)
@@ -151,7 +153,7 @@ class Platform:
         return state, state2d
 
     def update_action(self, env, t, mode, od_permutation=True):
-        if self.action_spec.mode != "joint":
+        if not self.action_spec.uses_joint_runner:
             raise ValueError("use update_price for legacy price-only control")
         state, state2d = self.observe(env, od_permutation)
         with torch.no_grad():

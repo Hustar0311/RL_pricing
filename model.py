@@ -25,11 +25,18 @@ class ActorMLP(torch.nn.Module):
             n=32,  # for positional encoding, 0 for using nn
             max_len=10080,
             extra_state_dim=0,
-            bounded_output=False
+            bounded_output=False,
+            state_free_dim=0
     ) -> None:
         super(ActorMLP, self).__init__()
         buf = []
         self.bounded_output = bounded_output
+        # trailing action entries produced by state-independent learnable logits (e.g. a global share)
+        self.state_free_dim = state_free_dim
+        if state_free_dim:
+            assert bounded_output and shapes[-1] > state_free_dim
+            shapes = list(shapes[:-1]) + [shapes[-1] - state_free_dim]
+            self.free_logit = torch.nn.Parameter(torch.zeros(state_free_dim))
         shapes = [size * size * max_waiting + size * (max_traveling + max_duration) + size + 1 + n + extra_state_dim] + shapes
         for (num_ins, num_outs) in zip(shapes[:-1], shapes[1:]):
             buf.append(torch.nn.Linear(num_ins, num_outs))
@@ -56,6 +63,8 @@ class ActorMLP(torch.nn.Module):
             a = np.sqrt(6 / (num_ins + num_outs))
             linear.weight.data.uniform_(-a, a, generator=rng)
             linear.bias.data.zero_()
+        if self.state_free_dim:
+            self.free_logit.data.zero_()
 
         print_summary(self)
 
@@ -80,6 +89,9 @@ class ActorMLP(torch.nn.Module):
         # print(x)
         x = self.linears[-1](x)
         # print(x.size())
+        if self.state_free_dim:
+            x = torch.cat([torch.tanh(x), torch.tanh(self.free_logit).expand(x.size(0), -1)], dim=1)
+            return x
         return torch.tanh(x) if self.bounded_output else x
 
 class TwinCriticMLP(torch.nn.Module):
@@ -181,10 +193,16 @@ class ActorCNN(torch.nn.Module):
             stride_size_pool: int,
             n=32,
             max_len=10080,
-            bounded_output=False
+            bounded_output=False,
+            state_free_dim=0
     ) -> None:
         super(ActorCNN, self).__init__()
         self.bounded_output = bounded_output
+        self.state_free_dim = state_free_dim
+        if state_free_dim:
+            assert bounded_output and shapes[-1] > state_free_dim
+            shapes = list(shapes[:-1]) + [shapes[-1] - state_free_dim]
+            self.free_logit = torch.nn.Parameter(torch.zeros(state_free_dim))
         buf_conv = []
         for (in_channels, out_channels) in zip(channels[:-1], channels[1:]):
             buf_conv.append(torch.nn.Conv2d(in_channels=in_channels, out_channels=out_channels, \
@@ -230,6 +248,8 @@ class ActorCNN(torch.nn.Module):
             a = np.sqrt(6 / (num_ins + num_outs))
             linear.weight.data.uniform_(-a, a, generator=rng)
             linear.bias.data.zero_()
+        if self.state_free_dim:
+            self.free_logit.data.zero_()
 
         print_summary(self)
 
@@ -248,6 +268,8 @@ class ActorCNN(torch.nn.Module):
         for linear in self.linears[1:-1]:
             x = torch.relu(linear(x))
         x = self.linears[-1](x)
+        if self.state_free_dim:
+            return torch.cat([torch.tanh(x), torch.tanh(self.free_logit).expand(x.size(0), -1)], dim=1)
 
         # print(x)
         # scale = 2*np.log(2)

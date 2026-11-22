@@ -366,7 +366,7 @@ class Environment:
         # update total and zone profit
         self.avg_profit -= self.avg_profits[0] / 30
         self.avg_profits[:-1] = self.avg_profits[1:]
-        income_basis = compensation_basis_total if self.action_mode == "joint" else tot_profit
+        income_basis = compensation_basis_total if self.action_mode != "price_only" else tot_profit
         income_denominator = np.sum(self.veh_count) + served_pass + 1e-4
         self.avg_profits[-1] = income_basis / income_denominator
         self.avg_profit += self.avg_profits[-1] / 30
@@ -570,7 +570,7 @@ class Environment:
             "driver_income_basis": float(income_basis),
             "driver_income_denominator": float(income_denominator),
             "driver_income_window": np.asarray(self.avg_profits, dtype=float).copy(),
-            "joint_action_enabled": self.action_mode == "joint",
+            "joint_action_enabled": self.action_mode != "price_only",
             "waiting_request_tensor_before": waiting_request_tensor_before,
             "waiting_request_tensor_after": self.pass_count.copy(),
             "idle_supply_vector": idle_supply_before,

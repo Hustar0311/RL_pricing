@@ -27,6 +27,9 @@ def economic_metrics(env, action):
     result.update(compensation_mean=float(action.compensation.mean()),
                   compensation_min=float(action.compensation.min()), compensation_max=float(action.compensation.max()),
                   driver_income_proxy=float(env.avg_profit))
+    if action.share is not None:
+        result.update(share_mean=float(action.share.mean()), share_min=float(action.share.min()),
+                      share_max=float(action.share.max()), share_std=float(action.share.std()))
     return result
 
 
@@ -77,6 +80,7 @@ def train_joint(env, controller, rates, writer, args):
         active_total, learning_total = 0.0, 0.0
         economics = {key: 0.0 for key in ECONOMIC_TOTALS}
         compensation_sum, compensation_min, compensation_max = 0.0, float('inf'), 0.0
+        share_sum, share_min, share_max = 0.0, float('inf'), 0.0
         state = image = action_tensor = None
         interval_reward = 0.0
         decision_t = 0
@@ -94,6 +98,10 @@ def train_joint(env, controller, rates, writer, args):
             compensation_sum += current_economics["compensation_mean"]
             compensation_min = min(compensation_min, current_economics["compensation_min"])
             compensation_max = max(compensation_max, current_economics["compensation_max"])
+            if "share_mean" in current_economics:
+                share_sum += current_economics["share_mean"]
+                share_min = min(share_min, current_economics["share_min"])
+                share_max = max(share_max, current_economics["share_max"])
             totals += np.asarray(outcome)
             active_total += env.active_veh
             _accumulate_br_stats(br_totals, env.get_last_step_stats())
@@ -121,6 +129,8 @@ def train_joint(env, controller, rates, writer, args):
         row.update(_finalize_br_stats(br_totals))
         row.update(economics, compensation_mean=compensation_sum/len(rates),
                    compensation_min=compensation_min, compensation_max=compensation_max)
+        if controller.action_spec.is_share_mode:
+            row.update(share_mean=share_sum/len(rates), share_min=share_min, share_max=share_max)
         history.append(row)
         metrics = dict(controller.pricer.last_metrics)
         metrics.update(epoch=epoch, critic_updates=controller.pricer.critic_updates,
