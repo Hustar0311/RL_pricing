@@ -141,7 +141,9 @@ class Constraint:
         return row["income"] / (self.k_d * row["trip_distance"] + self.k_t * row["trip_minutes"])
 
     def value(self, row):
-        return {"hourly": row["wage"], "budget": row["income"], "per_trip": self.raw(row)}[self.form]
+        value = {"hourly": row["wage"], "budget": row["income"], "per_trip": self.raw(row)}[self.form]
+        # a day with no online driver minutes (market collapse) has no wage: that is a violation, not a free pass
+        return float(value) if np.isfinite(value) else 0.0
 
     def score(self, rows):
         profit = float(np.mean([r["profit"] for r in rows]))

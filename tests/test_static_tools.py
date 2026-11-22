@@ -79,6 +79,15 @@ class StaticToolTests(unittest.TestCase):
             self.assertAlmostEqual(con.target, 1.2 * value)
             self.assertFalse(con.score(rows)[0] == con.score(rows)[1])  # a 20% shortfall is penalised
 
+    def test_collapsed_day_counts_as_violation_not_nan(self):
+        rows = [{"income": 100.0, "wage": 50.0, "served": 20.0, "trip_distance": 40.0, "trip_minutes": 80.0, "profit": 1.0}] * 3
+        con = dec.Constraint("hourly", 1.0, rows)
+        collapsed = dict(rows[0], wage=float("nan"), income=0.0)
+        objective, profit, metric = con.score([rows[0], collapsed, rows[2]])
+        self.assertTrue(np.isfinite(objective) and np.isfinite(metric))
+        self.assertLess(objective, profit)  # penalised
+        self.assertEqual(con.value(collapsed), 0.0)
+
     def test_decoupled_policy_maps_time_blocks_and_zone_groups(self):
         group = (SCENARIO.dd_train.sum(axis=(0, 2)) > np.median(SCENARIO.dd_train.sum(axis=(0, 2)))).astype(int)
         dec._CTX.update(base=lib.constant_policy(SCENARIO), group=group)
