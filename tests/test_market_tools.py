@@ -145,3 +145,33 @@ class CounterfactualToolTests(unittest.TestCase):
         removed = report["remove_drivers:4@10"]["15"]["online_vehicles"]
         self.assertLess(removed["diff"], 0)
         self.assertEqual(report["share_set:0.9@10"]["1"]["revenue"]["diff"], 0.0)  # same prices, same first-minute revenue
+
+
+class ScenarioAndHardThresholdTests(unittest.TestCase):
+    def test_make_scenario_scales_fleet_profiles_and_demand(self):
+        import tempfile
+        from pathlib import Path
+        from tools.make_scenario import main as make
+        with tempfile.TemporaryDirectory() as root:
+            target = make(["--name", "s", "--fleet_multiplier", "3", "--demand_scale", "2", "--profile_scale", "1.5",
+                           "--output_root", root])
+            vp, base = np.load(target / "vp.npy"), np.load(ROOT / "grid_small_dynamic/4/4/vp.npy")
+            self.assertEqual(len(vp), 3 * len(base))
+            np.testing.assert_allclose(vp[:len(base)], base * 1.5)
+            self.assertFalse(np.allclose(vp[len(base):2 * len(base)], base * 1.5))
+            np.testing.assert_allclose(np.load(target / "dd_test.npy"), SCENARIO.dd_test * 2)
+            self.assertTrue((Path(root) / ".gitignore").exists())
+
+    def test_hard_threshold_respects_interval_and_switch_cost(self):
+        for kw in [dict(driver_decision_interval=15), dict(driver_switch_cost=1.0)]:
+            m = lib.market_namespace({}, dict(use_passenger_entry_br=True, use_driver_online_br=False, **kw))
+            env = lib.make_environment(SCENARIO, m, 2)
+            policy = lib.constant_policy(SCENARIO)
+            decisions = []
+            for t in range(30):
+                lib.simulate(env, policy, SCENARIO.dd_test, t, 1, m, 1)
+                decisions.append(env.get_last_step_stats()["driver_decision_count"])
+            if "driver_decision_interval" in kw:
+                self.assertLess(max(decisions), len(SCENARIO.vp))
+            else:
+                self.assertTrue(all(d <= len(SCENARIO.vp) for d in decisions))
