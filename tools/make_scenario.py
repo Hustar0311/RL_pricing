@@ -34,6 +34,13 @@ def build(source, fleet_multiplier, profile_scale, demand_scale, jitter, seed):
     return arrays
 
 
+def resample_profiles(vp, rng):
+    """Fresh lognormal draw with the fleet's log-mean/log-std, rescaled to the fleet's mean (full redraw, same supply level)."""
+    logs = np.log(np.clip(vp, 1e-6, None))
+    draw = np.exp(logs.mean() + logs.std() * rng.standard_normal(len(vp)))
+    return draw * vp.mean() / draw.mean()
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--name", required=True)
@@ -45,6 +52,9 @@ def main(argv=None):
                         help="scale the spread of reservation profiles around their mean (<1 concentrates them)")
     parser.add_argument("--profile_jitter", type=float, default=0.05, help="relative std of the jitter on copied profiles")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--resample_profiles", action="store_true",
+                        help="redraw every reservation income from a lognormal with the fleet's mean and log-spread "
+                             "(rescaled to the same mean), instead of keeping the source profiles")
     parser.add_argument("--output_root", default=str(SCENARIOS))
     args = parser.parse_args(argv)
     if args.fleet_multiplier < 1 or args.profile_scale <= 0 or args.demand_scale <= 0:
@@ -59,6 +69,8 @@ def main(argv=None):
     if args.profile_concentration != 1.0:
         centre = arrays["vp"].mean()
         arrays["vp"] = np.clip(centre + args.profile_concentration * (arrays["vp"] - centre), 0.05, None)
+    if args.resample_profiles:
+        arrays["vp"] = resample_profiles(arrays["vp"], np.random.default_rng(args.seed + 1000))
     for name, value in arrays.items():
         np.save(target / (name + ".npy"), value)
     meta = {k: v for k, v in vars(args).items()}

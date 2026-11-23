@@ -240,3 +240,12 @@ class DriverSignalTests(unittest.TestCase):
         self.assertAlmostEqual(slope, 0.1, places=9)
         with self.assertRaises(ValueError):
             fit_shift([0, 1], [0.5, 0.4], 0.45)
+
+
+class ResampleProfileTests(unittest.TestCase):
+    def test_resample_keeps_mean_and_changes_every_profile(self):
+        from tools.make_scenario import resample_profiles
+        vp = np.linspace(1.0, 9.0, 32)
+        new = resample_profiles(vp, np.random.default_rng(3))
+        self.assertAlmostEqual(new.mean(), vp.mean())
+        self.assertTrue(np.all(new != vp))
