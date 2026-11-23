@@ -29,12 +29,12 @@ from welfare import step_welfare  # noqa: E402
 
 METRICS = ["served", "revenue", "net_profit", "driver_income_signal", "online_vehicles", "entered",
            "driver_total_income", "consumer_surplus", "negative_margin_orders", "switches",
-           "left", "wait_minutes", "pickup_minutes", "empty_minutes", "trip_distance", "trip_minutes"]
+           "left", "wait_minutes", "pickup_minutes", "empty_minutes", "trip_distance", "trip_minutes", "driver_idle_cost"]
 # metrics that accumulate over minutes (the others are read at the horizon minute)
 WARMUP_OFFSET = 10_000_000  # warm-up minutes use step ids disjoint from the evaluation minutes
 CUMULATIVE = {"served", "revenue", "net_profit", "entered", "driver_total_income", "consumer_surplus",
               "negative_margin_orders", "switches", "left", "wait_minutes", "pickup_minutes", "empty_minutes",
-              "trip_distance", "trip_minutes"}
+              "trip_distance", "trip_minutes", "driver_idle_cost"}
 
 
 # ----------------------------------------------------------------------------- scenario / policy
@@ -53,7 +53,7 @@ def market_namespace(configuration, overrides=None):
     values = dict(use_passenger_entry_br=False, use_driver_online_br=False, beta_passenger=1.0, beta_driver=1.0,
                   passenger_base_utility=2.0, passenger_price_sensitivity=1.0, passenger_wait_sensitivity=0.1,
                   passenger_calibration="none", target_demand_elasticity=-1.0, passenger_anchor_utility=1.0,
-                  passenger_anchor_price=1.0, driver_decision_interval=1, driver_switch_cost=0.0, online_zone_choice="random",
+                  passenger_anchor_price=1.0, driver_decision_interval=1, driver_switch_cost=0.0, online_zone_choice="random", idle_cost_bearer="platform",
                   pricing_mode=False, frequency=1, seed=47, br_random_seed=None, env_rng="isolated")
     values.update({k: v for k, v in (configuration or {}).items() if k in values and v is not None})
     values.update({k: v for k, v in (overrides or {}).items() if v is not None})
@@ -243,7 +243,7 @@ def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=N
         out[k] = [served, revenue, revenue - expense, env.avg_profit, env.active_veh, stats["actual_passenger_count"],
                   welfare["driver_total_income"], welfare["consumer_surplus"], welfare["negative_margin_order_count"],
                   audit["driver_switch_count"], left, float(np.sum(audit["service_wait_index"])), pickup, result[7],
-                  trip_distance, trip_minutes]
+                  trip_distance, trip_minutes, welfare["driver_idle_cost"]]
     return out
 
 

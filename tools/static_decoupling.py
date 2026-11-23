@@ -98,8 +98,9 @@ def run_job(job):
     trace = lib.simulate(env, policy, scenario.dd_test, 0, len(scenario.dd_test), market, seed, None, held)
     col = lib.METRICS.index
     served, minutes = trace[:, col("served")].sum(), trace[:, col("online_vehicles")].sum()
-    income = trace[:, col("driver_total_income")].sum()
-    return {"profit": trace[:, col("net_profit")].sum(), "revenue": trace[:, col("revenue")].sum(), "income": income,
+    idle = trace[:, col("driver_idle_cost")].sum()  # 0 unless --idle_cost_bearer driver
+    income = trace[:, col("driver_total_income")].sum() - idle  # driver NET income (pay minus idle costs borne)
+    return {"profit": trace[:, col("net_profit")].sum(), "revenue": trace[:, col("revenue")].sum(), "income": income, "idle_cost": idle,
             "wage": income / minutes * 60.0, "consumer_surplus": trace[:, col("consumer_surplus")].sum(), "served": served,
             "entered": trace[:, col("entered")].sum(), "wait": trace[:, col("wait_minutes")].sum() / served,
             "pickup": trace[:, col("pickup_minutes")].sum() / served, "empty_minutes": trace[:, col("empty_minutes")].sum(),

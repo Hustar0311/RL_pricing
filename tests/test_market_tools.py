@@ -175,3 +175,32 @@ class ScenarioAndHardThresholdTests(unittest.TestCase):
                 self.assertLess(max(decisions), len(SCENARIO.vp))
             else:
                 self.assertTrue(all(d <= len(SCENARIO.vp) for d in decisions))
+
+
+class IdleCostBearerTests(unittest.TestCase):
+    def run_with(self, **kw):
+        m = market(**kw)
+        env = lib.make_environment(SCENARIO, m, 4)
+        trace = lib.simulate(env, lib.constant_policy(SCENARIO, 1.0, 0.65), SCENARIO.dd_test, 300, 90, m, 9)
+        return env, trace
+
+    def test_platform_is_step_for_step_identical_to_default(self):
+        _, default = self.run_with()
+        _, platform = self.run_with(idle_cost_bearer="platform")
+        np.testing.assert_array_equal(default, platform)
+        self.assertEqual(platform[:, lib.METRICS.index("driver_idle_cost")].sum(), 0.0)
+
+    def test_driver_moves_idle_cost_from_platform_to_driver_only(self):
+        _, platform = self.run_with(idle_cost_bearer="platform")
+        env, driver = self.run_with(idle_cost_bearer="driver")
+        j = lib.METRICS.index
+        idle = driver[:, j("driver_idle_cost")]
+        self.assertGreater(idle.sum(), 0)
+        # market dynamics are untouched: only accounting differs
+        for name in lib.METRICS:
+            if name not in ("net_profit", "driver_idle_cost"):
+                np.testing.assert_array_equal(platform[:, j(name)], driver[:, j(name)], err_msg=name)
+        np.testing.assert_allclose(driver[:, j("net_profit")], platform[:, j("net_profit")] + idle, atol=1e-9)
+        audit = env.get_last_step_audit()
+        expected = (audit["driver_payment_total"] - audit["driver_idle_cost"]) / audit["online_vehicle_minutes"] * 60.0
+        self.assertAlmostEqual(audit["driver_hourly_wage"], expected)

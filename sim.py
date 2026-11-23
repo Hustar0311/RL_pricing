@@ -96,6 +96,9 @@ class Environment:
         self.online_zone_choice = getattr(config, "online_zone_choice", "random")
         if self.online_zone_choice not in ("random", "pay_weighted"):
             raise ValueError("online_zone_choice must be random or pay_weighted")
+        self.idle_cost_bearer = getattr(config, "idle_cost_bearer", "platform")
+        if self.idle_cost_bearer not in ("platform", "driver"):
+            raise ValueError("idle_cost_bearer must be platform or driver")
         self.target_demand_elasticity = float(getattr(config, "target_demand_elasticity", -1.0))
         self.passenger_anchor_utility = float(getattr(config, "passenger_anchor_utility", 1.0))
         self.passenger_anchor_price = float(getattr(config, "passenger_anchor_price", 1.0))
@@ -469,7 +472,7 @@ class Environment:
         idle_cruising_vehicle_count = int(np.sum(self.veh_count))
         cruising_expense = float(self.beta2 * idle_cruising_vehicle_count)
         reposition_expense = 0.0
-        tot_expense = service_expense + cruising_expense
+        tot_expense = service_expense + (cruising_expense if self.idle_cost_bearer == "platform" else 0.0)
         empty_minute += np.sum(self.veh_count)
 
         # update price_multiplier
@@ -553,7 +556,8 @@ class Environment:
                                                                (self.rand_double.pop() < reposition_probabilities[v.loc]).argmax())
                     if v.loc != new_loc:
                         move_expense = self.alpha2 * self.travel_distance[v.loc, new_loc] + self.beta2 * self.travel_time[v.loc, new_loc]
-                        tot_expense += move_expense
+                        if self.idle_cost_bearer == "platform":
+                            tot_expense += move_expense
                         reposition_expense += float(move_expense)
                         empty_mile += self.travel_distance[v.loc, new_loc]
                         empty_minute += self.travel_time[v.loc, new_loc]
@@ -671,7 +675,8 @@ class Environment:
             "driver_switch_to_offline_count": float(switch_to_offline),
             "driver_switch_to_online_count": float(switch_to_online),
             "driver_income_basis": float(income_basis),
-            **self._welfare_audit(passenger_audit, tot_profit, driver_payment_total),
+            **self._welfare_audit(passenger_audit, tot_profit, driver_payment_total,
+                                  (cruising_expense + reposition_expense) if self.idle_cost_bearer == "driver" else 0.0),
             "driver_income_denominator": float(income_denominator),
             "driver_income_window": np.asarray(self.avg_profits, dtype=float).copy(),
             "joint_action_enabled": self.action_mode != "price_only",
@@ -749,7 +754,7 @@ class Environment:
             return float(np.sum(potential * np.maximum(utility, 0.0)))
         return float(beta * np.sum(potential * np.logaddexp(0.0, utility / beta)))
 
-    def _welfare_audit(self, passenger_audit, revenue, driver_payment_total):
+    def _welfare_audit(self, passenger_audit, revenue, driver_payment_total, driver_idle_cost=0.0):
         potential_by_origin = np.sum(passenger_audit["potential_demand_matrix"], axis=1)
         online_minutes = float(self.active_veh)  # one step is one minute; all non-offline vehicles
         return {
@@ -757,7 +762,9 @@ class Environment:
             "passenger_revenue_total": float(revenue),
             "driver_total_income": float(driver_payment_total),
             "online_vehicle_minutes": online_minutes,
-            "driver_hourly_wage": float(driver_payment_total) / online_minutes * 60.0 if online_minutes > 0 else float("nan"),
+            "driver_idle_cost": float(driver_idle_cost),
+            "driver_hourly_wage": (float(driver_payment_total) - float(driver_idle_cost)) / online_minutes * 60.0
+            if online_minutes > 0 else float("nan"),
             "platform_take_rate": 1.0 - float(driver_payment_total) / float(revenue) if revenue > 0 else float("nan"),
         }
 
