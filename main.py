@@ -135,6 +135,7 @@ def write_metadata(args, result_folder):
             "env_rng": args.env_rng,
             "online_zone_choice": args.online_zone_choice,
             "idle_cost_bearer": args.idle_cost_bearer,
+            "driver_signal": args.driver_signal,
         },
         "process_audit_enabled": bool(args.enable_process_audit),
         "event_order": [
@@ -320,6 +321,9 @@ def build_parser():
     parser.add_argument('--idle_cost_bearer', choices=['platform', 'driver'], default='platform',
                         help='driver: cruising and reposition costs leave platform expense and are deducted from driver '
                              'net income (hourly wage in logs and constraints uses net income); platform keeps the legacy accounting')
+    parser.add_argument('--driver_signal', choices=['gross', 'net'], default='gross',
+                        help='net: the income signal drivers use to go online/offline is net of idle cruising and '
+                             'reposition cost (reposition cost lagged one step); gross keeps the legacy signal')
     parser.add_argument('--env_rng', choices=['legacy', 'isolated'], default='legacy',
                         help='isolated: the environment owns a numpy Generator instead of drawing from the global random lists')
     parser.add_argument('--keep_checkpoints', type=int, default=2,
@@ -436,6 +440,8 @@ if __name__ == '__main__':
         settings_tag += '_cal{}_e{}'.format(args.passenger_calibration, tag_float(args.target_demand_elasticity))
     if args.idle_cost_bearer != 'platform':
         settings_tag += '_idle' + args.idle_cost_bearer
+    if args.driver_signal != 'gross':
+        settings_tag += '_sig' + args.driver_signal
     if args.driver_decision_interval != 1 or args.driver_switch_cost != 0:
         settings_tag += '_dT{}_sc{}'.format(args.driver_decision_interval, tag_float(args.driver_switch_cost))
     if args.env_rng != 'legacy':

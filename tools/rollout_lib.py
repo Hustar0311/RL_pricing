@@ -53,7 +53,7 @@ def market_namespace(configuration, overrides=None):
     values = dict(use_passenger_entry_br=False, use_driver_online_br=False, beta_passenger=1.0, beta_driver=1.0,
                   passenger_base_utility=2.0, passenger_price_sensitivity=1.0, passenger_wait_sensitivity=0.1,
                   passenger_calibration="none", target_demand_elasticity=-1.0, passenger_anchor_utility=1.0,
-                  passenger_anchor_price=1.0, driver_decision_interval=1, driver_switch_cost=0.0, online_zone_choice="random", idle_cost_bearer="platform",
+                  passenger_anchor_price=1.0, driver_decision_interval=1, driver_switch_cost=0.0, online_zone_choice="random", idle_cost_bearer="platform", driver_signal="gross",
                   pricing_mode=False, frequency=1, seed=47, br_random_seed=None, env_rng="isolated")
     values.update({k: v for k, v in (configuration or {}).items() if k in values and v is not None})
     values.update({k: v for k, v in (overrides or {}).items() if v is not None})

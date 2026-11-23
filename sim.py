@@ -96,6 +96,11 @@ class Environment:
         self.online_zone_choice = getattr(config, "online_zone_choice", "random")
         if self.online_zone_choice not in ("random", "pay_weighted"):
             raise ValueError("online_zone_choice must be random or pay_weighted")
+        # online/offline income signal: "gross" (legacy) or "net" = minus idle cruising and reposition costs
+        self.driver_signal = getattr(config, "driver_signal", "gross")
+        if self.driver_signal not in ("gross", "net"):
+            raise ValueError("driver_signal must be gross or net")
+        self._last_reposition_expense = 0.0
         self.idle_cost_bearer = getattr(config, "idle_cost_bearer", "platform")
         if self.idle_cost_bearer not in ("platform", "driver"):
             raise ValueError("idle_cost_bearer must be platform or driver")
@@ -449,7 +454,12 @@ class Environment:
         self.avg_profits[:-1] = self.avg_profits[1:]
         income_basis = compensation_basis_total if self.action_mode != "price_only" else tot_profit
         income_denominator = np.sum(self.veh_count) + served_pass + 1e-4
-        self.avg_profits[-1] = income_basis / income_denominator
+        signal_basis = income_basis
+        if self.driver_signal == "net":
+            # idle costs in the units of the signal (pay / delta): cruising of this step and, because reposition
+            # moves are only drawn later in the step, the reposition cost of the previous step
+            signal_basis = income_basis - (self.beta2 * float(np.sum(self.veh_count)) + self._last_reposition_expense) / self.delta
+        self.avg_profits[-1] = signal_basis / income_denominator
         self.avg_profit += self.avg_profits[-1] / 30
         self.zone_profit -= self.zone_profits[0, :] / 30
         self.zone_profits[:-1, :] = self.zone_profits[1:, :]
@@ -716,6 +726,7 @@ class Environment:
             "vehicle_events": vehicle_events,
         }
 
+        self._last_reposition_expense = float(reposition_expense)
         self.step_index += 1
         return tot_profit, tot_expense, served_pass, left_pass, occu_mile, occu_minute, empty_mile, empty_minute
 
@@ -769,6 +780,7 @@ class Environment:
         }
 
     def reset(self):
+        self._last_reposition_expense = 0.0
         self.pass_count *= 0
         # No queued orders survive reset. Match the legacy price-history reset
         # convention, and start compensation history tied to that same history.

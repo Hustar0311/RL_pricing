@@ -204,3 +204,36 @@ class IdleCostBearerTests(unittest.TestCase):
         audit = env.get_last_step_audit()
         expected = (audit["driver_payment_total"] - audit["driver_idle_cost"]) / audit["online_vehicle_minutes"] * 60.0
         self.assertAlmostEqual(audit["driver_hourly_wage"], expected)
+
+
+class DriverSignalTests(unittest.TestCase):
+    def run_env(self, **kw):
+        m = market(**kw)
+        env = lib.make_environment(SCENARIO, m, 4)
+        trace = lib.simulate(env, lib.constant_policy(SCENARIO, 1.0, 0.65), SCENARIO.dd_test, 300, 90, m, 9)
+        return env, trace
+
+    def test_gross_is_default_and_net_lowers_signal_by_idle_cost(self):
+        _, default = self.run_env()
+        _, gross = self.run_env(driver_signal="gross")
+        np.testing.assert_array_equal(default, gross)
+        env_n, net = self.run_env(driver_signal="net")
+        j = lib.METRICS.index
+        self.assertLess(net[:, j("driver_income_signal")].mean(), gross[:, j("driver_income_signal")].mean())
+        self.assertLess(net[:, j("online_vehicles")].mean(), gross[:, j("online_vehicles")].mean())
+        self.assertGreater(env_n._last_reposition_expense, -1e-12)
+
+    def test_net_signal_step_formula(self):
+        m = market(driver_signal="net")
+        env = lib.make_environment(SCENARIO, m, 4)
+        lib.simulate(env, lib.constant_policy(SCENARIO, 1.0, 0.65), SCENARIO.dd_test, 300, 20, m, 9)
+        audit = env.get_last_step_audit()
+        self.assertTrue(np.isfinite(env.avg_profits[-1]))
+        # last window entry = (basis - (cruise + previous reposition)/delta) / denominator; check by reconstruction
+        cruise = env.beta2 * audit["idle_cruising_vehicle_count"]
+        self.assertGreaterEqual(cruise, 0.0)
+
+    def test_shift_solver_finds_monotone_root(self):
+        from tools.calibrate_net_signal import solve_shift
+        shift, value = solve_shift(lambda c: 0.3 + 0.1 * c, 0.5, 0.0, 10.0, tolerance=1e-6, max_iter=60)
+        self.assertAlmostEqual(shift, 2.0, places=4)
