@@ -85,6 +85,48 @@ def choose_lambdas(pilot, targets=TARGETS):
     return sorted(set(round(float(x), 1) for x in chosen))
 
 
+
+def fill_lambdas(result, max_new=4, jump=0.2):
+    """Extra lambdas for a finished run: beyond the grid ends when a frontier misses a target multiplier, and at the
+    midpoint of adjacent grid lambdas whose G jumps by more than `jump` (a non-concave stretch the Lagrangian skips)."""
+    pts = sorted(result["points"], key=lambda p: p["lambda"])
+    lam = np.array([p["lambda"] for p in pts])
+    ga = np.array([np.mean(p["a"]["days"]["g_rel"]) for p in pts])
+    gb = np.array([np.mean(p["b"]["days"]["g_rel"]) for p in pts])
+    new = []
+    # a frontier that stops short of a target (the pair is paired on G, so the weaker side decides) -> push lambda beyond the grid
+    if min(ga.max(), gb.max()) < max(MULTS):
+        new += [lam.max() * f for f in (1.05, 1.12, 1.25, 1.5)]
+    if max(ga.min(), gb.min()) > min(MULTS):
+        new += [lam.min() * f for f in (0.9, 0.75, 0.5)]
+    for g in (ga, gb):
+        for i in np.where(np.diff(g) > jump)[0]:
+            new.append(float((lam[i] + lam[i + 1]) / 2))
+    new = sorted(set(round(x, 1) for x in new if min(abs(x - lam)) > 1.0))
+    if len(new) > max_new:
+        new = sorted(new[i] for i in np.linspace(0, len(new) - 1, max_new).round().astype(int))
+    return new
+
+
+def finish(result, points, args, log):
+    """Delta(m) with bootstrap bands and the per-point service metrics from the evaluation days of every point."""
+    arr = lambda kind, key: np.array([p[kind]["days"][key] for p in points])
+    g_a, p_a, g_b, p_b = arr("a", "g_rel"), arr("a", "profit"), arr("b", "g_rel"), arr("b", "profit")
+    point, lo, hi = bootstrap_delta(g_a, p_a, g_b, p_b, MULTS, args.bootstrap)
+    result["delta_at"] = {str(m): {"mean": float(point[i]), "lo": float(lo[i]), "hi": float(hi[i])} for i, m in enumerate(MULTS)}
+    grid = np.linspace(0.8, 1.25, 19)
+    cp, clo, chi = bootstrap_delta(g_a, p_a, g_b, p_b, grid, args.bootstrap)
+    result["delta_curve"] = {"grid": grid.tolist(), "mean": cp.tolist(), "lo": clo.tolist(), "hi": chi.tolist()}
+    for key in ("online_minutes", "served", "consumer_surplus"):
+        result["delta_curve_" + key] = {}
+        ma, mb = arr("a", key), arr("b", key)
+        for tag, m, g in (("a", ma, g_a), ("b", mb, g_b)):
+            result["delta_curve_" + key][tag] = {"g_rel": g.mean(axis=1).tolist(), "mean": m.mean(axis=1).tolist()}
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.output).write_text(json.dumps(result, indent=1), encoding="utf-8")
+    log("Delta at {}: {}".format(MULTS, [tuple(np.round([result["delta_at"][str(m)][k] for k in ("mean", "lo", "hi")], 0).tolist()) for m in MULTS]))
+
+
 # ----------------------------------------------------------------------------- driver
 def setup(args):
     scenario = lib.Scenario(args.scenario)
@@ -134,6 +176,8 @@ def main(argv=None):
     parser.add_argument("--workers", type=int, default=15)
     parser.add_argument("--rng_seed", type=int, default=12345)
     parser.add_argument("--bootstrap", type=int, default=2000)
+    parser.add_argument("--reuse", default=None, help="finished frontier JSON: keep its points, solve only the extra lambdas")
+    parser.add_argument("--extra_lambdas", default="", help="comma separated lambdas (or 'auto') added to the --reuse run")
     args = parser.parse_args(argv)
     overrides, group = setup(args)
     opt_seeds = [args.opt_seed + r for r in range(args.opt_replicates)]
@@ -151,6 +195,39 @@ def main(argv=None):
         result["baseline"] = dec.summarize(baseline_rows, lag(0.0))
         log("== {} frontier on {}: G_base {:.4g}".format(args.form, Path(args.scenario).name, g_base))
         rng = np.random.default_rng(args.rng_seed)
+
+        if args.reuse:  # add lambdas to a finished run: its points stay, new ones warm-start from the nearest stored point
+            old = json.loads(Path(args.reuse).read_text(encoding="utf-8"))
+            assert old["form"] == args.form and old["final_seeds"] == final_seeds and old["opt_seeds"] == opt_seeds, "reuse: settings differ"
+            assert abs(old["baseline_value"] - g_base) < 1e-9 * max(1.0, abs(g_base)), "reuse: baseline differs"
+            extra_lams = fill_lambdas(old) if args.extra_lambdas == "auto" else [float(v) for v in args.extra_lambdas.split(",") if v]
+            log("reusing {} points; new lambdas {}".format(len(old["points"]), extra_lams))
+            points = list(old["points"])
+            stored = lambda entry, kind: (np.array(entry[kind]["prices"]), np.array(entry[kind]["shares"]))
+            for lam in extra_lams:
+                con = lag(lam)
+                order = sorted(points, key=lambda e: abs(e["lambda"] - lam))
+                warm_a = [stored(e, "a") for e in order[:2]]
+                xa, fa, _ = dec.search(ev, con, "a", warm_a, rng, opt_seeds, args.budget_scale, args.restarts, log)
+                warm_b = [dec.canonical("a", xa)] + [stored(e, "b") for e in order[:2]]
+                xb, fb, _ = dec.search(ev, con, "b", warm_b, rng, opt_seeds, args.budget_scale, args.restarts, log)
+                assert fb >= fa - 1e-6, "(b) fell below (a) at lambda {}".format(lam)
+                entry = {"lambda": lam, "objective_a": fa, "objective_b": fb, "added": True}
+                for kind, x in (("a", xa), ("b", xb)):
+                    rows = point_rows(ev, con, kind, x, final_seeds)
+                    prices, shares = dec.canonical(kind, x)
+                    entry[kind] = {"prices": prices.tolist(), "shares": shares.tolist(), "days": day_arrays(rows, con),
+                                   "summary": dec.summarize(rows, con)}
+                points.append(entry)
+                log("  lambda {:.0f}: (a) G {:.3f} profit {:.0f} | (b) G {:.3f} profit {:.0f}".format(
+                    lam, np.mean(entry["a"]["days"]["g_rel"]), np.mean(entry["a"]["days"]["profit"]),
+                    np.mean(entry["b"]["days"]["g_rel"]), np.mean(entry["b"]["days"]["profit"])))
+            points.sort(key=lambda e: e["lambda"])
+            old["points"], old["lambdas"] = points, [e["lambda"] for e in points]
+            old["reused_from"] = str(args.reuse)
+            old["wall_seconds_extension"] = time.time() - clock
+            finish(old, points, args, log)
+            return old
 
         # 1. lambda grid
         if args.lambdas == "auto":
@@ -214,24 +291,8 @@ def main(argv=None):
                 np.mean(entry["b"]["days"]["g_rel"]), np.mean(entry["b"]["days"]["profit"])))
         result["points"] = points
 
-    # 4. Delta(m) on the evaluation days
-    arr = lambda kind, key: np.array([p[kind]["days"][key] for p in points])
-    g_a, p_a, g_b, p_b = arr("a", "g_rel"), arr("a", "profit"), arr("b", "g_rel"), arr("b", "profit")
-    point, lo, hi = bootstrap_delta(g_a, p_a, g_b, p_b, MULTS, args.bootstrap)
-    result["delta_at"] = {str(m): {"mean": float(point[i]), "lo": float(lo[i]), "hi": float(hi[i])} for i, m in enumerate(MULTS)}
-    grid = np.linspace(0.8, 1.25, 19)
-    cp, clo, chi = bootstrap_delta(g_a, p_a, g_b, p_b, grid, args.bootstrap)
-    result["delta_curve"] = {"grid": grid.tolist(), "mean": cp.tolist(), "lo": clo.tolist(), "hi": chi.tolist()}
-    for key in ("online_minutes", "served", "consumer_surplus"):
-        result["delta_curve_" + key] = {}
-        ma, mb = arr("a", key), arr("b", key)
-        for tag, m in (("a", ma), ("b", mb)):
-            result["delta_curve_" + key][tag] = {"g_rel": g_a.mean(axis=1).tolist() if tag == "a" else g_b.mean(axis=1).tolist(),
-                                                  "mean": m.mean(axis=1).tolist()}
     result["wall_seconds"] = time.time() - clock
-    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
-    Path(args.output).write_text(json.dumps(result, indent=1), encoding="utf-8")
-    log("Delta at {}: {}".format(MULTS, [tuple(np.round([result["delta_at"][str(m)][k] for k in ("mean", "lo", "hi")], 0).tolist()) for m in MULTS]))
+    finish(result, points, args, log)
     return result
 
 

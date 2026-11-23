@@ -28,6 +28,17 @@ class FrontierArithmeticTests(unittest.TestCase):
         self.assertAlmostEqual(np.interp(1.0, [0.5, 0.9, 1.3], [0.0, 1e5, 2e5]), 1.25e5)
         self.assertIn(1.25e5, grid)
 
+    def test_fill_lambdas_extends_grid_where_a_frontier_misses_targets(self):
+        def point(lam, ga, gb):
+            return {"lambda": lam, "a": {"days": {"g_rel": [ga] * 3}}, "b": {"days": {"g_rel": [gb] * 3}}}
+        short = {"points": [point(1000.0, 0.9, 0.7), point(2000.0, 1.0, 0.75)]}
+        new = fr.fill_lambdas(short)
+        self.assertTrue(new and max(new) > 2000.0)  # (b) never reaches 1.2 -> push lambda up
+        covered = {"points": [point(1000.0, 0.7, 0.7), point(2000.0, 0.85, 0.85), point(3000.0, 1.0, 1.0), point(4000.0, 1.15, 1.15), point(5000.0, 1.3, 1.3)]}
+        self.assertEqual(fr.fill_lambdas(covered), [])
+        jumpy = {"points": [point(1000.0, 0.7, 0.7), point(2000.0, 1.3, 1.3)]}
+        self.assertEqual(fr.fill_lambdas(jumpy), [1500.0])
+
 
 if __name__ == "__main__":
     unittest.main()
