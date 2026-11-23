@@ -38,9 +38,10 @@ MARKET = dict(use_passenger_entry_br=True, use_driver_online_br=True, passenger_
               driver_decision_interval=30, passenger_wait_sensitivity=0.5)
 P_BOUNDS, S_BOUNDS = (0.8, 2.0), (0.1, 1.3)
 BLOCKS, BLOCK_MINUTES = 4, 360
-KINDS = {"a": 2, "a1": 5, "b": 9, "b1": 12}
-LABELS = {"a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b1": "(b') 4p + 8s"}
-BUDGET = {"a": (6, 5), "a1": (10, 6), "b": (12, 7), "b1": (16, 8)}  # (population, generations) per restart
+KINDS = {"f": 1, "a": 2, "a1": 5, "b": 9, "b1": 12}
+FIXED_SHARE = 0.75  # kind "f": uniform price optimised, share pinned at the baseline 0.75 (background control)
+LABELS = {"f": "(f) p, s = 0.75", "a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b1": "(b') 4p + 8s"}
+BUDGET = {"f": (6, 5), "a": (6, 5), "a1": (10, 6), "b": (12, 7), "b1": (16, 8)}  # (population, generations) per restart
 PENALTY = 2e5  # profit units per unit of relative constraint shortfall (1% shortfall = 2000)
 BASELINE = (np.ones(BLOCKS), np.full(2 * BLOCKS, 0.75))
 _CTX = {}
@@ -50,6 +51,8 @@ _CTX = {}
 def canonical(kind, theta):
     """Free parameters -> (4 block prices, 8 shares ordered block-major, group-minor)."""
     theta = np.asarray(theta, dtype=float)
+    if kind == "f":
+        return np.full(BLOCKS, theta[0]), np.full(2 * BLOCKS, FIXED_SHARE)
     if kind == "a":
         return np.full(BLOCKS, theta[0]), np.full(2 * BLOCKS, theta[1])
     if kind == "a1":
@@ -61,6 +64,8 @@ def canonical(kind, theta):
 
 def embed(kind, prices, shares):
     """Canonical policy -> free parameters of ``kind`` (exact when the policy lies in the family)."""
+    if kind == "f":
+        return np.array([prices.mean()])
     if kind == "a":
         return np.array([prices.mean(), shares.mean()])
     if kind == "a1":
@@ -72,7 +77,7 @@ def embed(kind, prices, shares):
 
 def bounds(kind):
     d = KINDS[kind]
-    n_p = {"a": 1, "a1": BLOCKS, "b": 1, "b1": BLOCKS}[kind]
+    n_p = {"f": 1, "a": 1, "a1": BLOCKS, "b": 1, "b1": BLOCKS}[kind]
     lo = np.array([P_BOUNDS[0]] * n_p + [S_BOUNDS[0]] * (d - n_p))
     hi = np.array([P_BOUNDS[1]] * n_p + [S_BOUNDS[1]] * (d - n_p))
     scales = np.array([0.15] * n_p + [0.08] * (d - n_p))
@@ -288,13 +293,16 @@ def run_setting(args, log):
         stamp("== {} {} x{:g}: target {:.4g} (baseline {:.4g}) on {}".format(
             args.constraint, args.level, args.level, con.target, con.baseline_value, Path(args.scenario).name))
         sol, obj, restarts_obj = {}, {}, {}
-        sol["a"], obj["a"], restarts_obj["a"] = search(ev, con, "a", [BASELINE], rng, opt_seeds, args.budget_scale, args.restarts, stamp)
+        sol["f"], obj["f"], restarts_obj["f"] = search(ev, con, "f", [BASELINE], np.random.default_rng(args.rng_seed + 1),
+                                                       opt_seeds, args.budget_scale, args.restarts, stamp)
+        warm_f = canonical("f", sol["f"])
+        sol["a"], obj["a"], restarts_obj["a"] = search(ev, con, "a", [BASELINE, warm_f], rng, opt_seeds, args.budget_scale, args.restarts, stamp)
         warm_a = canonical("a", sol["a"])
         sol["a1"], obj["a1"], restarts_obj["a1"] = search(ev, con, "a1", [warm_a], rng, opt_seeds, args.budget_scale, args.restarts, stamp)
         sol["b"], obj["b"], restarts_obj["b"] = search(ev, con, "b", [warm_a], rng, opt_seeds, args.budget_scale, args.restarts, stamp)
         sol["b1"], obj["b1"], restarts_obj["b1"] = search(ev, con, "b1", [canonical("a1", sol["a1"]), canonical("b", sol["b"])],
                                                           rng, opt_seeds, args.budget_scale, args.restarts, stamp)
-        for big, small in [("a1", "a"), ("b", "a"), ("b1", "a1"), ("b1", "b")]:
+        for big, small in [("a", "f"), ("a1", "a"), ("b", "a"), ("b1", "a1"), ("b1", "b")]:
             assert obj[big] >= obj[small] - 1e-6, "search objective of {} fell below {}".format(big, small)
         canon = {k: np.r_[canonical(k, sol[k])[0], canonical(k, sol[k])[1]] for k in KINDS}
         rows = {k: ev.run([canon[k]], final_seeds)[0] for k in KINDS}
@@ -317,7 +325,7 @@ def run_setting(args, log):
                            shares_at_bound=bool(np.any(shares <= lo_s + 0.005) or np.any(shares >= hi_s - 0.005)),
                            prices_at_bound=bool(np.any(prices <= P_BOUNDS[0] + 0.005) or np.any(prices >= P_BOUNDS[1] - 0.005)))
             result["policies"][k] = summary
-        for name, (big, small) in {"b1_vs_a1": ("b1", "a1"), "b_vs_a": ("b", "a"), "a1_vs_a": ("a1", "a"), "b1_vs_b": ("b1", "b")}.items():
+        for name, (big, small) in {"b1_vs_a1": ("b1", "a1"), "a_vs_f": ("a", "f"), "b_vs_a": ("b", "a"), "a1_vs_a": ("a1", "a"), "b1_vs_b": ("b1", "b")}.items():
             result["deltas"][name] = paired_delta(rows[big], rows[small], con, kappa)
         d = result["deltas"]["b1_vs_a1"]["profit"]
         stamp("  Delta (b')-(a') = {:+.0f} [{:+.0f}, {:+.0f}]; (b)-(a) = {:+.0f}".format(d["mean"], d["lo"], d["hi"], result["deltas"]["b_vs_a"]["profit"]["mean"]))

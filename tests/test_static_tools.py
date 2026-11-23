@@ -61,7 +61,7 @@ class StaticToolTests(unittest.TestCase):
 
     def test_policy_families_nest_exactly(self):
         prices, shares = np.array([1.1, 1.2, 1.3, 1.4]), np.full(8, 0.7)
-        for kind in dec.KINDS:
+        for kind in [k for k in dec.KINDS if k != "f"]:
             theta = dec.embed(kind, np.full(4, 1.25), np.full(8, 0.6))
             p, s = dec.canonical(kind, theta)
             np.testing.assert_array_equal(p, np.full(4, 1.25))
@@ -70,6 +70,11 @@ class StaticToolTests(unittest.TestCase):
         theta_b1 = dec.embed("b1", prices, shares)
         np.testing.assert_array_equal(np.r_[dec.canonical("b1", theta_b1)[0], dec.canonical("b1", theta_b1)[1]], np.r_[prices, shares])
         self.assertEqual([dec.KINDS[k] for k in ["a", "a1", "b", "b1"]], [2, 5, 9, 12])
+        # the fixed-share control (f) is nested in (a) and pins the share at 0.75
+        p, s = dec.canonical("f", dec.embed("f", np.full(4, 1.3), np.full(8, 0.6)))
+        np.testing.assert_array_equal(p, np.full(4, 1.3))
+        np.testing.assert_array_equal(s, np.full(8, 0.75))
+        self.assertEqual(dec.KINDS["f"], 1)
 
     def test_constraint_forms_have_unit_baseline(self):
         rows = [{"income": 100.0, "wage": 50.0, "served": 20.0, "trip_distance": 40.0, "trip_minutes": 80.0, "profit": 1.0}] * 3
