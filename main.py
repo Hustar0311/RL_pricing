@@ -1,7 +1,7 @@
 # input: parameters
 # output: trainded model under "train mode", tested results under "test mode"
 from sim import Environment
-from center import MAXP, MINP, Platform
+from center import MAXP, MINP, Platform, observation_normalization
 import sys
 import numpy as np
 import argparse
@@ -606,8 +606,7 @@ if __name__ == '__main__':
         from joint_training import train_joint, evaluate_joint
         controller = Platform(td, tt, args.num_zone, option=args.pricing_alg,
             actor_lr=args.actor_lr, critic_lr=args.critic_lr, device=args.device, writer=writer,
-            update_freq=args.frequency, veh_num=len(vp), demand_mean=np.mean(dd_train, axis=0),
-            demand_std=np.std(dd_train, axis=0), wage_mean=np.mean(vp), wage_std=np.std(vp),
+            update_freq=args.frequency, veh_num=len(vp), **observation_normalization(dd_train, vp),
             permutation=permutation, permutation2=permutation2, od_permutation=args.od_permutation,
             kernel_size=args.kernel_size, stride=args.stride, pooling=args.pooling,
             searching=args.searching, policy_delay=args.policy_delay, position_encode=args.position_encode,

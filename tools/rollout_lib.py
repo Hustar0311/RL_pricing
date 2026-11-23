@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from center import Platform  # noqa: E402
+from center import Platform, observation_normalization  # noqa: E402
 from economic_action import ActionSpec, EconomicAction, SHARE_MODES  # noqa: E402
 from joint_checkpoint import load_policy_only  # noqa: E402
 from runner import _prepare_demand_batch, _sample_poisson_counts  # noqa: E402
@@ -103,6 +103,10 @@ class Policy:
         return self.spec.decode(prices.numpy())
 
 
+def _same_folder(a, b):
+    return Path(str(a)).resolve() == Path(str(b)).resolve()
+
+
 def load_policy(checkpoint_dir, epoch, scenario, device="cpu"):
     path = Path(checkpoint_dir) / "joint_checkpoint_{}.pt".format(epoch)
     payload = torch.load(str(path), map_location="cpu", weights_only=False)
@@ -110,14 +114,23 @@ def load_policy(checkpoint_dir, epoch, scenario, device="cpu"):
     config, meta = contract["configuration"], contract["action_space"]
     if meta["num_zone"] != scenario.num_zone:
         raise ValueError("policy was trained for {} zones, scenario has {}".format(meta["num_zone"], scenario.num_zone))
+    trained_on = config.get("data_folder")
+    if trained_on is not None and not _same_folder(trained_on, scenario.folder):
+        print("WARNING: checkpoint was trained on {!r} but the scenario is {!r}; the observation standardisation "
+              "statistics (demand mean/std, wage mean/std) come from the TRAINING scenario in main.py, here from {!r}."
+              .format(trained_on, scenario.folder, scenario.folder), file=sys.stderr)
     with contextlib.redirect_stdout(io.StringIO()):
+        # share_lr / share_init only shape the optimiser and the initial weights; both are overwritten or unused when
+        # the trained weights are loaded, so they are not passed.  share_head_separate changes the network layout.
         controller = Platform(scenario.td, scenario.tt, scenario.num_zone, option=config["pricing_alg"],
             actor_lr=config["actor_lr"], critic_lr=config["critic_lr"], device=device, update_freq=config["frequency"],
             veh_num=len(scenario.vp), permutation=scenario.permutation, permutation2=scenario.permutation2,
             od_permutation=config["od_permutation"], kernel_size=config["kernel_size"], stride=config["stride"],
             pooling=config["pooling"], searching=config["searching"], policy_delay=config["policy_delay"],
             position_encode=config["position_encode"], auto_correlation=config["auto_correlation"],
-            forget=config["forget"], T_train=contract["time_period"], **action_kwargs(meta))
+            forget=config["forget"], T_train=contract["time_period"],
+            share_head_separate=bool(config.get("share_head_separate", False)),
+            **observation_normalization(scenario.dd_train, scenario.vp), **action_kwargs(meta))
     del payload
     load_policy_only(controller, path, device)
     return Policy(controller, config["frequency"], config["od_permutation"]), contract
@@ -132,11 +145,58 @@ def constant_policy(scenario, price=1.0, share=0.75, frequency=1):
     return Policy(controller, frequency, True, constant=(price, share))
 
 
-def make_environment(scenario, market, seed, frequency=1):
+def environment_config(market, seed):
     config = Namespace(**vars(market))
     config.seed, config.br_random_seed = seed, seed
     config.action_mode = "joint"  # settle with explicit compensation vectors and the order-compensation income signal
-    return Environment(scenario.td, scenario.tt, scenario.vp, scenario.num_zone, frequency=frequency, br_config=config)
+    return config
+
+
+def make_environment(scenario, market, seed, frequency=1):
+    return Environment(scenario.td, scenario.tt, scenario.vp, scenario.num_zone, frequency=frequency,
+                       br_config=environment_config(market, seed))
+
+
+class SnapshotMarketMismatch(ValueError):
+    pass
+
+
+def _same_value(a, b):
+    if isinstance(a, (int, float)) and isinstance(b, (int, float)) and not isinstance(a, bool) and not isinstance(b, bool):
+        return abs(a - b) <= 1e-12 * max(1.0, abs(a), abs(b))
+    return a == b
+
+
+def snapshot_market_differences(scenario, state, market, frequency=1):
+    """{field: (snapshot value, this run's value)} for the market rules where a snapshot disagrees with ``market``."""
+    wanted = make_environment(scenario, market, 0, frequency).market_rule_values()
+    missing = object()
+    return {name: (("<missing>" if state.get(name, missing) is missing else state[name]), value)
+            for name, value in wanted.items() if state.get(name, missing) is missing or not _same_value(state[name], value)}
+
+
+def align_snapshot_market(scenario, state, market, mode="error", frequency=1):
+    """Make a loaded snapshot obey this run's market rules.
+
+    ``Environment.restore_state`` replaces the whole environment __dict__, market rules included, while
+    ``simulate`` processes demand with ``market``.  mode='error' refuses a mismatching snapshot (listing the fields);
+    mode='override' rewrites the rules from ``market`` and recomputes the derived quantities, keeping the dynamic state.
+    """
+    if mode not in ("error", "override"):
+        raise ValueError("snapshot_market must be error or override")
+    differences = snapshot_market_differences(scenario, state, market, frequency)
+    if not differences:
+        return state
+    listing = "\n".join("  {}: snapshot={!r}  this run={!r}".format(k, a, b) for k, (a, b) in differences.items())
+    if mode == "error":
+        raise SnapshotMarketMismatch(
+            "snapshot market rules differ from this run's market (pass --snapshot_market override to rewrite them, "
+            "or match them with --passenger_br/--driver_br/--market):\n" + listing)
+    print("snapshot_market=override: rewriting market rules of the snapshot:\n" + listing, file=sys.stderr)
+    env = make_environment(scenario, market, 0, frequency)
+    env.restore_state(state)
+    env.apply_market(environment_config(market, env.br_random_seed))
+    return env.snapshot_state()
 
 
 # ----------------------------------------------------------------------------- interventions
@@ -214,12 +274,20 @@ class Intervention:
 
 
 # ----------------------------------------------------------------------------- simulation
-def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=None, held=None):
-    """Run ``minutes`` steps from the restored state; returns an array (minutes, len(METRICS))."""
+ACTION_NAMES = ("p", "q", "s")
+
+
+def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=None, held=None, record_actions=False):
+    """Run ``minutes`` steps from the restored state; returns an array (minutes, len(METRICS)).
+
+    With ``record_actions=True`` returns ``(trace, actions)`` where ``actions`` has shape (minutes, num_zone, 3):
+    the executed (after the intervention) passenger price p, order-pay multiplier q and share s = q * delta / p.
+    """
     spec = policy.spec
     policy.set_held_prices(held)
     action = policy.action_from_prices(held) if held is not None else None
     out = np.zeros((minutes, len(METRICS)))
+    actions = np.zeros((minutes, env.num_zone, len(ACTION_NAMES))) if record_actions else None
     if intervention is not None:
         intervention.remove_drivers(env, seed)
     for k in range(minutes):
@@ -228,6 +296,9 @@ def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=N
         if action is None or t % policy.frequency == 0:
             action = policy.decide(env, t)
         price, comp = (action.price, action.compensation) if intervention is None else intervention.apply(action, spec.delta, k)
+        if record_actions:
+            actions[k, :, 0], actions[k, :, 1] = price, comp
+            actions[k, :, 2] = np.asarray(comp, dtype=float) * spec.delta / np.asarray(price, dtype=float)
         factor = 1.0 if intervention is None else intervention.demand_factor(k)
         demand_rng = np.random.default_rng(np.random.SeedSequence([int(seed), int(t), 99]))
         demand = _prepare_demand_batch((test_counts[t:t + 1] * factor), price, market, demand_rng)[0]
@@ -244,7 +315,7 @@ def simulate(env, policy, test_counts, t0, minutes, market, seed, intervention=N
                   welfare["driver_total_income"], welfare["consumer_surplus"], welfare["negative_margin_order_count"],
                   audit["driver_switch_count"], left, float(np.sum(audit["service_wait_index"])), pickup, result[7],
                   trip_distance, trip_minutes, welfare["driver_idle_cost"]]
-    return out
+    return (out, actions) if record_actions else out
 
 
 def horizon_values(trace, horizons):
@@ -257,6 +328,11 @@ def horizon_values(trace, horizons):
             values[name] = float(trace[:h, j].sum()) if name in CUMULATIVE else float(trace[h - 1, j])
         rows[h] = values
     return rows
+
+
+def action_horizon_values(actions, horizons):
+    """Per-zone mean of (p, q, s) over the first h minutes, array (num_zone, 3) for each horizon."""
+    return {min(h, len(actions)): actions[:min(h, len(actions))].mean(axis=0) for h in horizons}
 
 
 def confidence_interval(values, level=0.95):

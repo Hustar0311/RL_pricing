@@ -50,7 +50,19 @@ class Environment:
         else:
             self.rand_int, self.rand_double = [], []
 
-    def configure_bounded_rationality(self, config=None):
+    # market-rule fields parsed by configure_market_rules; a snapshot carries them in its __dict__
+    MARKET_RULE_FIELDS = (
+        "use_passenger_entry_br", "use_driver_online_br", "use_bounded_rationality", "driver_decision_interval",
+        "driver_switch_cost", "passenger_calibration", "online_zone_choice", "driver_signal", "idle_cost_bearer",
+        "target_demand_elasticity", "passenger_anchor_utility", "passenger_anchor_price", "beta_passenger",
+        "beta_driver", "passenger_base_utility", "passenger_price_sensitivity", "passenger_wait_sensitivity",
+    )
+
+    def configure_market_rules(self, config=None):
+        """Parse the market rules (switches, calibration, driver inertia, utility parameters) from ``config``.
+
+        Touches no random stream and no simulation state, so it can also re-apply a market to a restored snapshot.
+        """
         has_individual_flags = config is not None and (
             hasattr(config, "use_passenger_entry_br")
             or hasattr(config, "use_driver_online_br")
@@ -69,21 +81,6 @@ class Environment:
         self.use_bounded_rationality = bool(
             self.use_passenger_entry_br or self.use_driver_online_br
         )
-
-        seed = getattr(config, "br_random_seed", None)
-        if seed is None:
-            seed = getattr(config, "seed", None)
-        self.br_random_seed = seed
-        seed_sequence = np.random.SeedSequence(seed)
-        # children 0 and 1 are identical to spawn(2); child 2 only exists for env_rng="isolated"
-        passenger_seed, driver_seed, env_seed = seed_sequence.spawn(3)
-        self.passenger_rng = np.random.default_rng(passenger_seed)
-        self.driver_rng = np.random.default_rng(driver_seed)
-        self.env_rng_mode = getattr(config, "env_rng", "legacy")
-        if self.env_rng_mode not in ("legacy", "isolated"):
-            raise ValueError("env_rng must be legacy or isolated")
-        self.env_rng = np.random.default_rng(env_seed) if self.env_rng_mode == "isolated" else None
-        self.step_index = 0
         # driver decision inertia: driver k re-decides only when (step + k) % interval == 0
         self.driver_decision_interval = int(getattr(config, "driver_decision_interval", 1))
         self.driver_switch_cost = float(getattr(config, "driver_switch_cost", 0.0))
@@ -100,14 +97,12 @@ class Environment:
         self.driver_signal = getattr(config, "driver_signal", "gross")
         if self.driver_signal not in ("gross", "net"):
             raise ValueError("driver_signal must be gross or net")
-        self._last_reposition_expense = 0.0
         self.idle_cost_bearer = getattr(config, "idle_cost_bearer", "platform")
         if self.idle_cost_bearer not in ("platform", "driver"):
             raise ValueError("idle_cost_bearer must be platform or driver")
         self.target_demand_elasticity = float(getattr(config, "target_demand_elasticity", -1.0))
         self.passenger_anchor_utility = float(getattr(config, "passenger_anchor_utility", 1.0))
         self.passenger_anchor_price = float(getattr(config, "passenger_anchor_price", 1.0))
-
         self.beta_passenger = float(getattr(config, "beta_passenger", 1.0))
         self.beta_driver = float(getattr(config, "beta_driver", 1.0))
         self.passenger_base_utility = float(getattr(config, "passenger_base_utility", 2.0))
@@ -117,6 +112,34 @@ class Environment:
             if self.beta_passenger <= 1e-8:
                 raise ValueError("anchor calibration needs beta_passenger > 0")
             self._configure_anchor_calibration()
+        else:  # a restored snapshot may carry the previous market's calibrated values
+            for stale in ("calibrated_price_sensitivity", "calibrated_base_utility", "calibration_anchor_probability"):
+                self.__dict__.pop(stale, None)
+
+    def market_rule_values(self):
+        return {name: getattr(self, name) for name in self.MARKET_RULE_FIELDS}
+
+    def apply_market(self, config):
+        """Overwrite the market rules of this (e.g. snapshot-restored) environment; simulation state is kept."""
+        self.configure_market_rules(config)
+
+    def configure_bounded_rationality(self, config=None):
+        self.configure_market_rules(config)
+        seed = getattr(config, "br_random_seed", None)
+        if seed is None:
+            seed = getattr(config, "seed", None)
+        self.br_random_seed = seed
+        seed_sequence = np.random.SeedSequence(seed)
+        # children 0 and 1 are identical to spawn(2); child 2 only exists for env_rng="isolated"
+        passenger_seed, driver_seed, env_seed = seed_sequence.spawn(3)
+        self.passenger_rng = np.random.default_rng(passenger_seed)
+        self.driver_rng = np.random.default_rng(driver_seed)
+        self.env_rng_mode = getattr(config, "env_rng", "legacy")
+        if self.env_rng_mode not in ("legacy", "isolated"):
+            raise ValueError("env_rng must be legacy or isolated")
+        self.env_rng = np.random.default_rng(env_seed) if self.env_rng_mode == "isolated" else None
+        self.step_index = 0
+        self._last_reposition_expense = 0.0
 
         self._pending_passenger_stats = None
         self._pending_passenger_audit = None

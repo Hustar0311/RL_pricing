@@ -99,6 +99,8 @@ def main(argv=None):
     parser.add_argument("--passenger_br", choices=["on", "off", "checkpoint"], default="checkpoint")
     parser.add_argument("--driver_br", choices=["on", "off", "checkpoint"], default="checkpoint")
     parser.add_argument("--market", default="", help="extra market overrides as key=value, comma separated")
+    parser.add_argument("--snapshot_market", choices=["error", "override"], default="error",
+                        help="--snapshot only: error out when the snapshot's market rules differ from this run's, or override them")
     parser.add_argument("--output", help="write the result JSON here")
     args = parser.parse_args(argv)
 
@@ -112,6 +114,7 @@ def main(argv=None):
     market = lib.market_namespace(configuration, overrides)
     if args.snapshot:
         state, held, t0, _ = lib.load_snapshot(args.snapshot)
+        state = lib.align_snapshot_market(scenario, state, market, args.snapshot_market, policy.frequency)
     else:
         state, held, t0 = lib.build_start_state(scenario, policy, market, args.start_minute, args.seed - 1)
     result = measure(scenario, policy, market, state, held, t0, args.replicates, args.seed, args.perturbation,
