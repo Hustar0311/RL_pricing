@@ -26,7 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools import static_decoupling as dec  # noqa: E402
 from tools import rollout_lib as lib  # noqa: E402
 
-PILOT_LAMBDAS = [0.0, 3e4, 6e4, 1e5, 1.5e5, 2.5e5, 4e5, 8e5]
+PILOT_LAMBDAS = [0.0, 1e4, 2e4, 3e4, 4e4, 5e4, 6e4, 7e4, 8e4, 9e4, 1e5, 1.2e5, 1.5e5]
 TARGETS = [0.8, 0.9, 0.95, 1.0, 1.1, 1.2, 1.25]
 MULTS = [0.8, 1.0, 1.2]
 
@@ -77,8 +77,10 @@ def bootstrap_delta(g_a, p_a, g_b, p_b, grid, n_boot=2000, seed=0):
 def choose_lambdas(pilot, targets=TARGETS):
     """Lambda values whose pilot (a) points reach the targets: linear interpolation of lambda over the pilot G."""
     lam, g = np.array([p[0] for p in pilot]), np.array([p[1] for p in pilot])
-    order = np.argsort(g)
-    g, lam = g[order], lam[order]
+    order = np.argsort(lam)
+    lam, g = lam[order], np.maximum.accumulate(g[order])  # G(lambda) is non-decreasing; remove search noise
+    keep = np.r_[True, np.diff(g) > 1e-9]  # drop saturated plateaus
+    lam, g = lam[keep], g[keep]
     chosen = np.interp(targets, g, lam)  # targets outside the reached range clip to the end points
     return sorted(set(round(float(x), 1) for x in chosen))
 
@@ -155,7 +157,7 @@ def main(argv=None):
             pilot, warm = [], [dec.BASELINE]
             for lam in PILOT_LAMBDAS:
                 con = lag(lam)
-                x, f, _ = dec.search(ev, con, "a", warm, np.random.default_rng(args.rng_seed + 7), opt_seeds, 0.5, 1, log)
+                x, f, _ = dec.search(ev, con, "a", warm, np.random.default_rng(args.rng_seed + 7), opt_seeds, 1.0, 2, lambda m: None)
                 warm = [dec.canonical("a", x)]
                 g = con.score(point_rows(ev, con, "a", x, opt_seeds))[2] / g_base
                 pilot.append((lam, g))
