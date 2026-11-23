@@ -233,7 +233,10 @@ class DriverSignalTests(unittest.TestCase):
         cruise = env.beta2 * audit["idle_cruising_vehicle_count"]
         self.assertGreaterEqual(cruise, 0.0)
 
-    def test_shift_solver_finds_monotone_root(self):
-        from tools.calibrate_net_signal import solve_shift
-        shift, value = solve_shift(lambda c: 0.3 + 0.1 * c, 0.5, 0.0, 10.0, tolerance=1e-6, max_iter=60)
-        self.assertAlmostEqual(shift, 2.0, places=4)
+    def test_shift_fit_recovers_linear_root(self):
+        from tools.calibrate_net_signal import fit_shift
+        shift, slope = fit_shift([-1, 0, 1, 2], [0.3 + 0.1 * c for c in [-1, 0, 1, 2]], 0.5)
+        self.assertAlmostEqual(shift, 2.0, places=9)
+        self.assertAlmostEqual(slope, 0.1, places=9)
+        with self.assertRaises(ValueError):
+            fit_shift([0, 1], [0.5, 0.4], 0.45)
