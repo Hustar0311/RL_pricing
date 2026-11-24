@@ -10,7 +10,7 @@ import os
 import time
 import random
 import subprocess
-from economic_action import ActionSpec, ACTION_MODES, SHARE_MODES, FIXED_SHARE
+from economic_action import ActionSpec, ACTION_MODES, SHARE_MODES, FIXED_SHARE, FIXED_MODES
 from datetime import datetime
 import torch
 from torch.utils.tensorboard import SummaryWriter
@@ -430,7 +430,7 @@ if __name__ == '__main__':
             tag_float(args.compensation_max), args.frequency)
     elif args.action_mode in SHARE_MODES:
         settings_tag += '_{}'.format(args.action_mode)
-        if args.action_mode == FIXED_SHARE:
+        if args.action_mode in FIXED_MODES:
             settings_tag += '_s{}'.format(tag_float(args.share_value))
         else:
             settings_tag += '_s{}_{}'.format(tag_float(args.share_min), tag_float(args.share_max))

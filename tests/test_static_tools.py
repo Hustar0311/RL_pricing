@@ -85,6 +85,21 @@ class StaticToolTests(unittest.TestCase):
         pf, _ = dec.canonical("f", dec.embed("f", np.full(4, 1.25), np.full(8, 0.4)))
         np.testing.assert_array_equal(dec.canonical("g", dec.embed("g", pf, np.full(8, 0.4)))[0], pf)
 
+    def test_b4_is_between_a_and_b(self):
+        self.assertNotIn("b4", dec.KINDS)
+        self.assertEqual(dec.DIMS["b4"], 5)
+        theta = np.array([1.2, 0.5, 0.6, 0.7, 0.8])
+        p, s = dec.canonical("b4", theta)
+        np.testing.assert_array_equal(p, np.full(4, 1.2))
+        np.testing.assert_array_equal(s, [0.5, 0.5, 0.6, 0.6, 0.7, 0.7, 0.8, 0.8])
+        np.testing.assert_allclose(dec.embed("b4", p, s), theta)
+        # (a) embeds into (b4), (b4) embeds into (b)
+        pa, sa = dec.canonical("a", dec.embed("a", np.full(4, 1.3), np.full(8, 0.6)))
+        np.testing.assert_array_equal(dec.canonical("b4", dec.embed("b4", pa, sa))[1], sa)
+        np.testing.assert_array_equal(dec.canonical("b", dec.embed("b", p, s))[1], s)
+        lo, hi, scales, n_p = dec.bounds("b4")
+        self.assertEqual((len(lo), n_p), (5, 1))
+
     def test_constraint_forms_have_unit_baseline(self):
         rows = [{"income": 100.0, "wage": 50.0, "served": 20.0, "trip_distance": 40.0, "trip_minutes": 80.0, "profit": 1.0}] * 3
         for form, value in [("hourly", 50.0), ("budget", 100.0), ("per_trip", 1.0)]:

@@ -6,9 +6,11 @@ import numpy as np
 PRICE_ONLY = "price_only"
 JOINT = "joint"
 FIXED_SHARE = "fixed_share"
+FIXED_SHARE_GLOBAL = "fixed_share_global"  # one global price for every zone, share pinned
+FIXED_MODES = (FIXED_SHARE, FIXED_SHARE_GLOBAL)
 LEARNED_SHARE = "learned_share"
 JOINT_SHARE = "joint_share"
-SHARE_MODES = (FIXED_SHARE, LEARNED_SHARE, JOINT_SHARE)
+SHARE_MODES = (FIXED_SHARE, FIXED_SHARE_GLOBAL, LEARNED_SHARE, JOINT_SHARE)
 ACTION_MODES = (PRICE_ONLY, JOINT) + SHARE_MODES
 # Every mode except price_only runs through the joint_training runner.
 JOINT_RUNNER_MODES = (JOINT,) + SHARE_MODES
@@ -79,7 +81,7 @@ class ActionSpec:
         """Bounds used to normalise the order-compensation history in the state."""
         if self.mode == JOINT:
             return self.compensation_min, self.compensation_max
-        if self.mode == FIXED_SHARE:
+        if self.mode in FIXED_MODES:
             return self.share_value / (3.0 * self.delta), 3.0 * self.share_value / self.delta
         if self.mode in (LEARNED_SHARE, JOINT_SHARE):
             return self.share_min / (3.0 * self.delta), 3.0 * self.share_max / self.delta
@@ -88,7 +90,7 @@ class ActionSpec:
     def decode_share(self, value):
         """Map normalized actions in [-1, 1] to a per-zone share vector."""
         Z = self.num_zone
-        if self.mode == FIXED_SHARE:
+        if self.mode in FIXED_MODES:
             return np.full(Z, float(self.share_value))
         span = self.share_max - self.share_min
         if self.mode == LEARNED_SHARE:
@@ -101,6 +103,8 @@ class ActionSpec:
             raise ValueError("invalid normalized action shape or non-finite action")
         value = np.clip(value, -1.0, 1.0)
         price = np.power(3.0, value[:self.num_zone])
+        if self.mode == FIXED_SHARE_GLOBAL:
+            price = np.full(self.num_zone, price[0])
         share = None
         if self.mode == JOINT:
             compensation = np.exp(np.log(self.compensation_min)
@@ -117,15 +121,15 @@ class ActionSpec:
     def metadata(self):
         if self.is_share_mode:
             q_low, q_high = self.q_bounds()
-            layout = {FIXED_SHARE: ["price"], LEARNED_SHARE: ["price", "share"],
+            layout = {FIXED_SHARE: ["price"], FIXED_SHARE_GLOBAL: ["global_price"], LEARNED_SHARE: ["price", "share"],
                       JOINT_SHARE: ["price", "share"]}[self.mode]
             return {
                 "version": 1, "state_version": 2, "mode": self.mode, "num_zone": self.num_zone,
                 "dimension": self.dimension, "layout": layout,
                 "price_bounds": [1.0 / 3.0, 3.0],
                 "share_bounds": [self.share_min, self.share_max],
-                "share_value": self.share_value if self.mode == FIXED_SHARE else None,
-                "share_scope": {FIXED_SHARE: "global_fixed", LEARNED_SHARE: "global_state_independent",
+                "share_value": self.share_value if self.mode in FIXED_MODES else None,
+                "share_scope": {FIXED_SHARE: "global_fixed", FIXED_SHARE_GLOBAL: "global_fixed", LEARNED_SHARE: "global_state_independent",
                                 JOINT_SHARE: "per_zone"}[self.mode],
                 "delta": self.delta,
                 "compensation_bounds": [q_low, q_high],
@@ -151,6 +155,8 @@ class ActionSpec:
 
 
 def action_dimension(mode, num_zone):
+    if mode == FIXED_SHARE_GLOBAL:
+        return 1
     if mode in (JOINT, JOINT_SHARE):
         return 2 * num_zone
     if mode == LEARNED_SHARE:

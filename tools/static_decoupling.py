@@ -39,10 +39,10 @@ MARKET = dict(use_passenger_entry_br=True, use_driver_online_br=True, passenger_
 P_BOUNDS, S_BOUNDS = (0.8, 2.0), (0.1, 1.3)
 BLOCKS, BLOCK_MINUTES = 4, 360
 KINDS = {"f": 1, "a": 2, "a1": 5, "b": 9, "b1": 12}
-DIMS = dict(KINDS, g=4)  # (g) is only used by the fixed-share tools, so it is not part of the default study loop
+DIMS = dict(KINDS, g=4, b4=5)  # (g) and (b4) are only used by the fixed-share / low-noise tools, not by the default study loop
 FIXED_SHARE = 0.75  # kinds "f"/"g": prices optimised, share pinned (baseline 0.75; fixed_share_value tools override it)
-LABELS = {"f": "(f) p, s = 0.75", "g": "(g) 4p, s fixed", "a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b1": "(b') 4p + 8s"}
-BUDGET = {"f": (6, 5), "g": (10, 6), "a": (6, 5), "a1": (10, 6), "b": (12, 7), "b1": (16, 8)}  # (population, generations) per restart
+LABELS = {"f": "(f) p, s = 0.75", "g": "(g) 4p, s fixed", "a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b4": "(b4) p + 4s", "b1": "(b') 4p + 8s"}
+BUDGET = {"f": (6, 5), "g": (10, 6), "a": (6, 5), "a1": (10, 6), "b": (12, 7), "b4": (8, 6), "b1": (16, 8)}  # (population, generations) per restart
 PENALTY = 2e5  # profit units per unit of relative constraint shortfall (1% shortfall = 2000)
 BASELINE = (np.ones(BLOCKS), np.full(2 * BLOCKS, 0.75))
 _CTX = {}
@@ -62,6 +62,8 @@ def canonical(kind, theta):
         return theta[:BLOCKS].copy(), np.full(2 * BLOCKS, theta[BLOCKS])
     if kind == "b":
         return np.full(BLOCKS, theta[0]), theta[1:].copy()
+    if kind == "b4":  # one price all day, one share per block (both demand groups share it)
+        return np.full(BLOCKS, theta[0]), np.repeat(theta[1:1 + BLOCKS], 2)
     return theta[:BLOCKS].copy(), theta[BLOCKS:].copy()
 
 
@@ -77,12 +79,14 @@ def embed(kind, prices, shares):
         return np.r_[prices, shares.mean()]
     if kind == "b":
         return np.r_[prices.mean(), shares]
+    if kind == "b4":
+        return np.r_[prices.mean(), np.asarray(shares).reshape(BLOCKS, 2).mean(axis=1)]
     return np.r_[prices, shares]
 
 
 def bounds(kind):
     d = DIMS[kind]
-    n_p = {"f": 1, "g": BLOCKS, "a": 1, "a1": BLOCKS, "b": 1, "b1": BLOCKS}[kind]
+    n_p = {"f": 1, "g": BLOCKS, "a": 1, "a1": BLOCKS, "b": 1, "b4": 1, "b1": BLOCKS}[kind]
     lo = np.array([P_BOUNDS[0]] * n_p + [S_BOUNDS[0]] * (d - n_p))
     hi = np.array([P_BOUNDS[1]] * n_p + [S_BOUNDS[1]] * (d - n_p))
     scales = np.array([0.15] * n_p + [0.08] * (d - n_p))

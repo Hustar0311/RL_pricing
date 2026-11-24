@@ -87,6 +87,8 @@ def main(argv=None):
     ap.add_argument("--constrained_from", default=None,
                     help="--repeats JSON: for every stored (a_i), solve the constrained (b) once more (independent search, started from a_i)")
     ap.add_argument("--repeats", type=int, default=0)
+    ap.add_argument("--second_kind", default="b", choices=["b", "b4"],
+                    help="policy class searched against (a) in --repeats mode (b: price + 8 shares, b4: price + 4 block shares)")
     ap.add_argument("--mu", type=float, default=MU)
     ap.add_argument("--opt_replicates", type=int, default=10)
     ap.add_argument("--final_replicates", type=int, default=20)
@@ -108,7 +110,7 @@ def main(argv=None):
     log = lambda msg: print("{:>6.0f}s {}".format(time.time() - clock, msg), flush=True)
     frontier = json.loads(Path(args.warm_from).read_text(encoding="utf-8"))["points"] if args.warm_from else []
     result = {"scenario": args.scenario, "market": overrides, "form": args.form, "mu": args.mu, "band": BAND, "restarts": args.restarts,
-              "opt_seeds": opt_seeds, "final_seeds": final_seeds, "points": [], "repeats": []}
+              "opt_seeds": opt_seeds, "final_seeds": final_seeds, "points": [], "repeats": [], "second_kind": args.second_kind}
     with mp.get_context("fork").Pool(args.workers) as pool:
         ev = dec.Evaluator(pool)
         baseline_rows = ev.run([np.r_[dec.BASELINE[0], dec.BASELINE[1]]], final_seeds)[0]
@@ -169,9 +171,9 @@ def main(argv=None):
             for rep in range(args.repeats):
                 rep_rng = np.random.default_rng(args.rng_seed + 100 + rep)
                 xa, fa, _ = dec.search(ev, con, "a", [dec.BASELINE], rep_rng, opt_seeds, args.budget_scale, args.restarts, log)
-                xb, fb, _ = dec.search(ev, con, "b", [dec.canonical("a", xa)], rep_rng, opt_seeds, args.budget_scale, args.restarts, log)
-                ea, eb = evaluate(ev, con, "a", xa, final_seeds), evaluate(ev, con, "b", xb, final_seeds)
-                reps.append({"objective_a": fa, "objective_b": fb, "a": ea, "b": eb})
+                xb, fb, _ = dec.search(ev, con, args.second_kind, [dec.canonical("a", xa)], rep_rng, opt_seeds, args.budget_scale, args.restarts, log)
+                ea, eb = evaluate(ev, con, "a", xa, final_seeds), evaluate(ev, con, args.second_kind, xb, final_seeds)
+                reps.append({"objective_a": fa, "objective_b": fb, "a": ea, "b": eb})  # "b" holds the second_kind solution
                 log("  repeat {} target {:.2f}: delta {:+.0f} (G a {:.3f} b {:.3f})".format(
                     rep, t, mean_of(eb, "profit") - mean_of(ea, "profit"), mean_of(ea, "g_rel"), mean_of(eb, "g_rel")))
             result["repeats"].append({"target": t, "reps": reps})

@@ -257,3 +257,18 @@ class ShareOptimizerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class GlobalPriceModeTests(unittest.TestCase):
+    def test_global_price_is_broadcast_and_dimension_is_one(self):
+        self.assertEqual(action_dimension("fixed_share_global", 16), 1)
+        spec = ActionSpec(16, "fixed_share_global", share_value=0.4)
+        action = spec.decode(np.array([0.5]))
+        np.testing.assert_allclose(action.price, np.full(16, 3 ** 0.5))
+        np.testing.assert_allclose(action.share, np.full(16, 0.4))
+        np.testing.assert_allclose(action.compensation, action.price * 0.4 / spec.delta)
+        self.assertTrue(spec.is_share_mode)
+        self.assertEqual(spec.metadata()["layout"], ["global_price"])
+        self.assertEqual(spec.q_bounds(), ActionSpec(16, "fixed_share", share_value=0.4).q_bounds())
+        with self.assertRaises(ValueError):
+            spec.decode(np.zeros(16))

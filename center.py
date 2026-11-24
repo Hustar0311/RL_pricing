@@ -37,7 +37,7 @@ class Platform:
             raise ValueError("joint actions require TD3_MLP or TD3_CNN")
         share_init_logit = 0.0
         if share_init is not None:
-            if not self.action_spec.is_share_mode or self.action_spec.mode == "fixed_share":
+            if not self.action_spec.is_share_mode or self.action_spec.mode in ("fixed_share", "fixed_share_global"):
                 raise ValueError("share_init applies to learned_share and joint_share only")
             unit = 2.0 * (share_init - share_min) / (share_max - share_min) - 1.0
             if not -1.0 < unit < 1.0:
