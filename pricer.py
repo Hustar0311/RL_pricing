@@ -112,6 +112,8 @@ class Pricer:
         )
 
 class TD3(Pricer):
+    actor_grad_clip = MAX_GRAD_NORM_ACTOR  # main.py --actor_grad_clip overrides this per instance
+
     def _configure_share_group(self, actor_lr, share_lr, share_init_logit):
         """Actor optimizer; share-only parameters get their own learning rate and skip gradient clipping."""
         share = list(self.actor.share_parameters())
@@ -194,7 +196,7 @@ class TD3(Pricer):
                 self.writer.add_scalar("TD3_loss/policy_loss", policy_loss, iter)
             self.actor.zero_grad()
             policy_loss.backward()
-            actor_norm = torch.nn.utils.clip_grad_norm_(self._clipped_actor_parameters(), MAX_GRAD_NORM_ACTOR)
+            actor_norm = torch.nn.utils.clip_grad_norm_(self._clipped_actor_parameters(), self.actor_grad_clip)
             if not torch.isfinite(actor_norm):
                 raise FloatingPointError("non-finite TD3 actor gradient")
             self.actor_optim.step()

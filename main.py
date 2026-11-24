@@ -202,6 +202,7 @@ def write_runtime_summary(result_dir, runtime_info, args):
         "n_epochs": args.n_epochs,
         "batch_size": args.batch_size,
         "actor_lr": args.actor_lr,
+        "actor_grad_clip": args.actor_grad_clip,
         "critic_lr": args.critic_lr,
         "device": args.device,
         "use_bounded_rationality": bool(args.use_bounded_rationality),
@@ -271,6 +272,8 @@ def build_parser():
     parser.add_argument('-o', '--od_permutation', action='store_false', default=True,
                         help='enable the permutation of OD features')
     parser.add_argument('-alr', '--actor_lr', type=float, default=0.00001, help='learning rate of actor')
+    parser.add_argument('--actor_grad_clip', type=float, default=None,
+                        help='TD3 actor gradient-norm clip (default: the built-in 0.01)')
     parser.add_argument('-clr', '--critic_lr', type=float, default=0.001, help='learning rate of critic')
     parser.add_argument('-u', '--update_frequency', type=int, default=25,
                         help='base frequency for policy update') 
@@ -438,6 +441,8 @@ if __name__ == '__main__':
             settings_tag += '_slr{}{}'.format(tag_float(args.share_lr), 'h' if args.share_head_separate else '')
     if args.passenger_calibration != 'none':
         settings_tag += '_cal{}_e{}'.format(args.passenger_calibration, tag_float(args.target_demand_elasticity))
+    if args.actor_grad_clip is not None:
+        settings_tag += '_agc' + tag_float(args.actor_grad_clip)
     if args.idle_cost_bearer != 'platform':
         settings_tag += '_idle' + args.idle_cost_bearer
     if args.driver_signal != 'gross':
@@ -614,6 +619,8 @@ if __name__ == '__main__':
             action_mode=args.action_mode, compensation_min=args.compensation_min, compensation_max=args.compensation_max,
             share_min=args.share_min, share_max=args.share_max, share_value=args.share_value,
             share_lr=args.share_lr, share_init=args.share_init, share_head_separate=args.share_head_separate)
+        if args.actor_grad_clip is not None:
+            controller.pricer.actor_grad_clip = args.actor_grad_clip
         if is_train_mode:
             start_sync = safe_cuda_synchronize(args.device)
             start_time, start_counter = datetime.now(), time.perf_counter()

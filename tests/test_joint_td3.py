@@ -58,6 +58,28 @@ class JointTD3Tests(unittest.TestCase):
                         self.assertEqual(batch[2].shape, (8, 32))
                         torch.testing.assert_close(batch[7] - batch[6], torch.full((8, 1), frequency))
 
+    def test_actor_grad_clip_default_and_override(self):
+        import pricer
+        seen = []
+        real = torch.nn.utils.clip_grad_norm_
+        torch.nn.utils.clip_grad_norm_ = lambda params, max_norm, *a, **k: (seen.append(max_norm), real(params, max_norm, *a, **k))[1]
+        try:
+            for override, expected in [(None, pricer.MAX_GRAD_NORM_ACTOR), (1.0, 1.0)]:
+                controller, env = platform("TD3_MLP", 1)
+                if override is not None:
+                    controller.pricer.actor_grad_clip = override
+                state, state2d = controller.observe(env, True)
+                for t in range(12):
+                    controller.update_action(env, t, "train", True)
+                    controller.buffer.push(state, state2d, controller.prices, state, state2d, float(t), t, t + 1, terminal=t == 11)
+                seen.clear()
+                for iteration in range(4):
+                    controller.pricer.update_policy(8, controller.buffer, iteration)
+                self.assertIn(expected, seen)
+                self.assertNotIn(pricer.MAX_GRAD_NORM_ACTOR if expected != pricer.MAX_GRAD_NORM_ACTOR else 1.0, seen[-1:])
+        finally:
+            torch.nn.utils.clip_grad_norm_ = real
+
     def test_replay_roundtrip_and_dimension_rejection(self):
         controller, env = platform()
         state, image = controller.observe(env)
