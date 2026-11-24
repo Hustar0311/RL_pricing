@@ -61,7 +61,7 @@ class StaticToolTests(unittest.TestCase):
 
     def test_policy_families_nest_exactly(self):
         prices, shares = np.array([1.1, 1.2, 1.3, 1.4]), np.full(8, 0.7)
-        for kind in [k for k in dec.KINDS if k != "f"]:
+        for kind in [k for k in dec.KINDS if k not in ("f", "g")]:
             theta = dec.embed(kind, np.full(4, 1.25), np.full(8, 0.6))
             p, s = dec.canonical(kind, theta)
             np.testing.assert_array_equal(p, np.full(4, 1.25))
@@ -75,6 +75,15 @@ class StaticToolTests(unittest.TestCase):
         np.testing.assert_array_equal(p, np.full(4, 1.3))
         np.testing.assert_array_equal(s, np.full(8, 0.75))
         self.assertEqual(dec.KINDS["f"], 1)
+        self.assertNotIn("g", dec.KINDS)
+        self.assertEqual(dec.DIMS["g"], 4)
+        # (g) = four block prices at the pinned share; (f) is nested in it
+        theta = dec.embed("g", np.array([1.0, 1.1, 1.2, 1.3]), np.full(8, 0.4))
+        p, s = dec.canonical("g", theta)
+        np.testing.assert_array_equal(p, [1.0, 1.1, 1.2, 1.3])
+        np.testing.assert_array_equal(s, np.full(8, dec.FIXED_SHARE))
+        pf, _ = dec.canonical("f", dec.embed("f", np.full(4, 1.25), np.full(8, 0.4)))
+        np.testing.assert_array_equal(dec.canonical("g", dec.embed("g", pf, np.full(8, 0.4)))[0], pf)
 
     def test_constraint_forms_have_unit_baseline(self):
         rows = [{"income": 100.0, "wage": 50.0, "served": 20.0, "trip_distance": 40.0, "trip_minutes": 80.0, "profit": 1.0}] * 3

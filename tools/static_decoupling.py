@@ -39,9 +39,10 @@ MARKET = dict(use_passenger_entry_br=True, use_driver_online_br=True, passenger_
 P_BOUNDS, S_BOUNDS = (0.8, 2.0), (0.1, 1.3)
 BLOCKS, BLOCK_MINUTES = 4, 360
 KINDS = {"f": 1, "a": 2, "a1": 5, "b": 9, "b1": 12}
-FIXED_SHARE = 0.75  # kind "f": uniform price optimised, share pinned at the baseline 0.75 (background control)
-LABELS = {"f": "(f) p, s = 0.75", "a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b1": "(b') 4p + 8s"}
-BUDGET = {"f": (6, 5), "a": (6, 5), "a1": (10, 6), "b": (12, 7), "b1": (16, 8)}  # (population, generations) per restart
+DIMS = dict(KINDS, g=4)  # (g) is only used by the fixed-share tools, so it is not part of the default study loop
+FIXED_SHARE = 0.75  # kinds "f"/"g": prices optimised, share pinned (baseline 0.75; fixed_share_value tools override it)
+LABELS = {"f": "(f) p, s = 0.75", "g": "(g) 4p, s fixed", "a": "(a) p + s", "a1": "(a') 4p + s", "b": "(b) p + 8s", "b1": "(b') 4p + 8s"}
+BUDGET = {"f": (6, 5), "g": (10, 6), "a": (6, 5), "a1": (10, 6), "b": (12, 7), "b1": (16, 8)}  # (population, generations) per restart
 PENALTY = 2e5  # profit units per unit of relative constraint shortfall (1% shortfall = 2000)
 BASELINE = (np.ones(BLOCKS), np.full(2 * BLOCKS, 0.75))
 _CTX = {}
@@ -53,6 +54,8 @@ def canonical(kind, theta):
     theta = np.asarray(theta, dtype=float)
     if kind == "f":
         return np.full(BLOCKS, theta[0]), np.full(2 * BLOCKS, FIXED_SHARE)
+    if kind == "g":
+        return theta[:BLOCKS].copy(), np.full(2 * BLOCKS, FIXED_SHARE)
     if kind == "a":
         return np.full(BLOCKS, theta[0]), np.full(2 * BLOCKS, theta[1])
     if kind == "a1":
@@ -66,6 +69,8 @@ def embed(kind, prices, shares):
     """Canonical policy -> free parameters of ``kind`` (exact when the policy lies in the family)."""
     if kind == "f":
         return np.array([prices.mean()])
+    if kind == "g":
+        return np.array(prices, dtype=float)
     if kind == "a":
         return np.array([prices.mean(), shares.mean()])
     if kind == "a1":
@@ -76,8 +81,8 @@ def embed(kind, prices, shares):
 
 
 def bounds(kind):
-    d = KINDS[kind]
-    n_p = {"f": 1, "a": 1, "a1": BLOCKS, "b": 1, "b1": BLOCKS}[kind]
+    d = DIMS[kind]
+    n_p = {"f": 1, "g": BLOCKS, "a": 1, "a1": BLOCKS, "b": 1, "b1": BLOCKS}[kind]
     lo = np.array([P_BOUNDS[0]] * n_p + [S_BOUNDS[0]] * (d - n_p))
     hi = np.array([P_BOUNDS[1]] * n_p + [S_BOUNDS[1]] * (d - n_p))
     scales = np.array([0.15] * n_p + [0.08] * (d - n_p))
@@ -230,7 +235,7 @@ def search(ev, con, kind, warm, rng, seeds, budget_scale, restarts, log):
         if r == 0 and candidates:
             x0, sigma0 = max(candidates, key=lambda c: c[0])[1], 1.0
         else:
-            x0 = np.r_[rng.uniform(1.0, 1.6, n_p), rng.uniform(0.3, 1.0, KINDS[kind] - n_p)]
+            x0 = np.r_[rng.uniform(1.0, 1.6, n_p), rng.uniform(0.3, 1.0, DIMS[kind] - n_p)]
             sigma0 = 2.0
         x, f = run_es(ev, con, kind, x0, lam, gens, sigma0, rng, seeds, log)
         runs.append((f, x))
