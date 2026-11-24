@@ -40,17 +40,23 @@ def evaluate(scenario, policy, market, state, held, t0, interventions, replicate
         raise ValueError("fork minute {} + {} exceeds the test horizon".format(t0, span))
     control = {h: [] for h in horizons}
     treated = {i.label(): {h: [] for h in horizons} for i in interventions}
+    control_actions = {h: [] for h in horizons}
+    treated_actions = {i.label(): {h: [] for h in horizons} for i in interventions}
     for r in range(replicates):
         seed = seed0 + r
         env.restore_state(state)
-        base = lib.horizon_values(lib.simulate(env, policy, scenario.dd_test, t0, span, market, seed, None, held), horizons)
+        trace, acts = lib.simulate(env, policy, scenario.dd_test, t0, span, market, seed, None, held, record_actions=True)
+        base, base_actions = lib.horizon_values(trace, horizons), lib.action_horizon_values(acts, horizons)
         for h in horizons:
             control[h].append(base[h])
+            control_actions[h].append(base_actions[h])
         for arm in interventions:
             env.restore_state(state)
-            values = lib.horizon_values(lib.simulate(env, policy, scenario.dd_test, t0, span, market, seed, arm, held), horizons)
+            trace, acts = lib.simulate(env, policy, scenario.dd_test, t0, span, market, seed, arm, held, record_actions=True)
+            values, arm_actions = lib.horizon_values(trace, horizons), lib.action_horizon_values(acts, horizons)
             for h in horizons:
                 treated[arm.label()][h].append(values[h])
+                treated_actions[arm.label()][h].append(arm_actions[h])
     report = {}
     for label, per_h in treated.items():
         report[label] = {}
@@ -61,8 +67,29 @@ def evaluate(scenario, policy, market, state, held, t0, interventions, replicate
                 t = np.array([row[name] for row in per_h[h]])
                 mean, low, high = lib.confidence_interval(t - c)
                 cell[name] = {"control": float(c.mean()), "treated": float(t.mean()), "diff": mean, "ci95": [low, high]}
+            cell["actions"] = action_report(control_actions[h], treated_actions[label][h])
             report[label][str(h)] = cell
     return report
+
+
+def action_report(control, treated):
+    """Executed per-zone p, q, s over a horizon: control/treated means, paired difference and 95% interval.
+
+    ``control``/``treated`` are lists (replicates) of (num_zone, 3) arrays.  ``zone_mean`` averages the zones
+    inside each replicate before the interval is taken.
+    """
+    c, t = np.stack(control), np.stack(treated)  # (replicates, zones, 3)
+    out = {}
+    for j, name in enumerate(lib.ACTION_NAMES):
+        diff = t[:, :, j] - c[:, :, j]
+        zone_ci = [lib.confidence_interval(diff[:, z]) for z in range(diff.shape[1])]
+        mean, low, high = lib.confidence_interval(diff.mean(axis=1))
+        out[name] = {
+            "control": c[:, :, j].mean(axis=0).tolist(), "treated": t[:, :, j].mean(axis=0).tolist(),
+            "diff": [z[0] for z in zone_ci], "ci95": [[z[1], z[2]] for z in zone_ci],
+            "zone_mean": {"control": float(c[:, :, j].mean()), "treated": float(t[:, :, j].mean()),
+                          "diff": mean, "ci95": [low, high]}}
+    return out
 
 
 def format_table(report, names=("served", "net_profit", "driver_income_signal", "online_vehicles")):
@@ -77,6 +104,10 @@ def format_table(report, names=("served", "net_profit", "driver_income_signal", 
                 parts.append("{:>9.3f}->{:<9.3f} d={:+8.3f}[{:+.3f},{:+.3f}]".format(
                     c["control"], c["treated"], c["diff"], *c["ci95"]))
             lines.append("{:>5} ".format(h) + " ".join(parts))
+            if "actions" in cell:
+                lines.append("      all-zone mean " + "  ".join(
+                    "Δ{}={:+.4f}[{:+.4f},{:+.4f}]".format(a, cell["actions"][a]["zone_mean"]["diff"], *cell["actions"][a]["zone_mean"]["ci95"])
+                    for a in lib.ACTION_NAMES))
     return "\n".join(lines)
 
 
@@ -96,6 +127,8 @@ def main(argv=None):
     parser.add_argument("--passenger_br", choices=["on", "off", "checkpoint"], default="checkpoint")
     parser.add_argument("--driver_br", choices=["on", "off", "checkpoint"], default="checkpoint")
     parser.add_argument("--market", default="")
+    parser.add_argument("--snapshot_market", choices=["error", "override"], default="error",
+                        help="--snapshot only: error out when the snapshot's market rules differ from this run's, or override them")
     parser.add_argument("--output")
     args = parser.parse_args(argv)
 
@@ -110,6 +143,7 @@ def main(argv=None):
     interventions = [lib.Intervention.parse(text, args.horizon, zones) for text in args.intervention]
     if args.snapshot:
         state, held, t0, _ = lib.load_snapshot(args.snapshot)
+        state = lib.align_snapshot_market(scenario, state, market, args.snapshot_market, policy.frequency)
     else:
         state, held, t0 = lib.build_start_state(scenario, policy, market, args.start_minute, args.seed - 1)
     report = evaluate(scenario, policy, market, state, held, t0, interventions, args.replicates, args.seed, policy.frequency)

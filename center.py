@@ -13,6 +13,16 @@ from scipy.optimize import linprog
 MAXP = 3
 MINP = 1/3
 
+
+def observation_normalization(dd_train, vp):
+    """Observation standardisation statistics the joint-runner controller is trained with.
+
+    Shared by main.py (training) and tools.rollout_lib.load_policy (offline evaluation) so both build the
+    same ``Platform.preprocess``; the demand statistics are per OD pair, the wage statistics scalars.
+    """
+    return dict(demand_mean=np.mean(dd_train, axis=0), demand_std=np.std(dd_train, axis=0),
+                wage_mean=np.mean(vp), wage_std=np.std(vp))
+
 class Platform:
     def __init__(self, travel_distance, travel_time, num_zone, max_waiting = 5, max_step = 6, option = 'TD3_MLP', permutation = None, permutation2 = None,
         kernel_size = 3, stride = 1, pooling = 2, device = 'cpu', actor_lr=0.0001, critic_lr=0.001, update_freq = 1, writer = None, od_permutation = True,
