@@ -26,6 +26,11 @@ class EpsilonConstraintTests(unittest.TestCase):
         self.assertAlmostEqual(con.score([self.row(51.0, 520.0)] * 3)[0], 1000.0)
         self.assertLess(con.score([self.row(51.0, 450.0)] * 3)[0], 1000.0 - 1.0)
 
+    def test_online_cap_penalises_more_minutes_only(self):
+        con = eps.Epsilon("hourly", ROWS, 1.0, om_cap=500.0)
+        self.assertAlmostEqual(con.score([self.row(51.0, 480.0)] * 3)[0], 1000.0)
+        self.assertLess(con.score([self.row(51.0, 550.0)] * 3)[0], 1000.0 - 1.0)
+
     def test_boot_mean_interval_brackets_mean(self):
         out = eps.boot_mean(np.arange(20.0), 300)
         self.assertLessEqual(out["lo"], out["mean"])

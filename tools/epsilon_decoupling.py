@@ -29,11 +29,11 @@ MU = 1e7
 
 
 class Epsilon(dec.Constraint):
-    """Quadratic penalty keeping G / G_base inside [target, target + band]; optional online-minutes floor."""
+    """Quadratic penalty keeping G / G_base inside [target, target + band]; optional online-minutes floor / cap."""
 
-    def __init__(self, form, baseline_rows, target, mu=MU, band=BAND, om_floor=None, mu_om=MU):
+    def __init__(self, form, baseline_rows, target, mu=MU, band=BAND, om_floor=None, mu_om=MU, om_cap=None):
         super().__init__(form, 1.0, baseline_rows)
-        self.t, self.mu, self.band, self.om_floor, self.mu_om = float(target), mu, band, om_floor, mu_om
+        self.t, self.mu, self.band, self.om_floor, self.mu_om, self.om_cap = float(target), mu, band, om_floor, mu_om, om_cap
 
     def score(self, rows):
         profit = float(np.mean([r["profit"] for r in rows]))
@@ -43,6 +43,9 @@ class Epsilon(dec.Constraint):
         if self.om_floor is not None:
             om = float(np.mean([r["online_minutes"] for r in rows]))
             pen += self.mu_om * max(0.0, 1.0 - om / self.om_floor) ** 2
+        if self.om_cap is not None:
+            om = float(np.mean([r["online_minutes"] for r in rows]))
+            pen += self.mu_om * max(0.0, om / self.om_cap - 1.0) ** 2
         return profit - pen, profit, metric
 
 
@@ -79,6 +82,10 @@ def main(argv=None):
     ap.add_argument("--targets", required=True, help="comma separated W values (relative to the reference)")
     ap.add_argument("--causal_targets", default="", help="subset of targets that also get the online-minutes-floor (b)")
     ap.add_argument("--warm_from", default=None, help="frontier_decoupling JSON whose points warm-start the searches")
+    ap.add_argument("--causal_mode", choices=["floor", "cap"], default="floor",
+                    help="online-minutes constraint for the constrained (b): floor (>= (a)'s minutes) or cap (<= (a)'s minutes)")
+    ap.add_argument("--constrained_from", default=None,
+                    help="--repeats JSON: for every stored (a_i), solve the constrained (b) once more (independent search, started from a_i)")
     ap.add_argument("--repeats", type=int, default=0)
     ap.add_argument("--mu", type=float, default=MU)
     ap.add_argument("--opt_replicates", type=int, default=10)
@@ -111,7 +118,7 @@ def main(argv=None):
         log("== {} epsilon on {}: G_base {:.4g}".format(args.form, Path(args.scenario).name, result["baseline_value"]))
         rng = np.random.default_rng(args.rng_seed)
         prev = {"a": None, "b": None}
-        for t in ([] if args.repeats else targets):  # --repeats replaces the warm-started pass
+        for t in ([] if (args.repeats or args.constrained_from) else targets):  # --repeats replaces the warm-started pass
             con = mk(t)
             warm_a = [dec.BASELINE] + (nearest(frontier, "a", t) if frontier else []) + ([prev["a"]] if prev["a"] else [])
             xa, fa, _ = dec.search(ev, con, "a", warm_a, rng, opt_seeds, args.budget_scale, args.restarts, log)
@@ -123,17 +130,40 @@ def main(argv=None):
                      "b": evaluate(ev, con, "b", xb, final_seeds)}
             if t in causal:
                 om_ref = float(np.mean([r["online_minutes"] for r in fr.point_rows(ev, con, "a", xa, opt_seeds)]))
-                con_c = mk(t, om_floor=om_ref)
+                con_c = mk(t, **({"om_floor": om_ref} if args.causal_mode == "floor" else {"om_cap": om_ref}))
                 xc, fc, _ = dec.search(ev, con_c, "b", [ca, dec.canonical("b", xb)], rng, opt_seeds, args.budget_scale, args.restarts, log)
-                entry["b_floor"] = evaluate(ev, con, "b", xc, final_seeds)
-                entry["om_floor"] = om_ref
-                entry["objective_b_floor"] = fc
+                key = "b_floor" if args.causal_mode == "floor" else "b_cap"
+                entry[key] = evaluate(ev, con, "b", xc, final_seeds)
+                entry["om_" + args.causal_mode] = om_ref
+                entry["objective_" + key] = fc
             result["points"].append(entry)
             d = np.array(entry["b"]["days"]["profit"]) - np.array(entry["a"]["days"]["profit"])
             log("  target {:.2f}: (a) G {:.3f} profit {:.0f} | (b) G {:.3f} profit {:.0f} | delta {:+.0f}{}".format(
                 t, mean_of(entry["a"], "g_rel"), mean_of(entry["a"], "profit"), mean_of(entry["b"], "g_rel"), mean_of(entry["b"], "profit"),
-                d.mean(), "" if "b_floor" not in entry else " | floor-(b) profit {:.0f} G {:.3f}".format(
-                    mean_of(entry["b_floor"], "profit"), mean_of(entry["b_floor"], "g_rel"))))
+                d.mean(), "" if not ({"b_floor", "b_cap"} & set(entry)) else " | constrained-(b) profit {:.0f} G {:.3f}".format(
+                    *(mean_of(entry.get("b_floor", entry.get("b_cap")), k) for k in ("profit", "g_rel")))))
+        if args.constrained_from:  # one more independent (b) search per stored (a_i), under the online-minutes constraint
+            stored = json.loads(Path(args.constrained_from).read_text(encoding="utf-8"))
+            assert stored["form"] == args.form and stored["final_seeds"] == final_seeds, "constrained_from: settings differ"
+            for item in stored["repeats"]:
+                t, con, reps = item["target"], mk(item["target"]), []
+                for rep, r in enumerate(item["reps"]):
+                    ca = (np.array(r["a"]["prices"]), np.array(r["a"]["shares"]))
+                    xa = dec.embed("a", *ca)
+                    om_ref = float(np.mean([row["online_minutes"] for row in fr.point_rows(ev, con, "a", xa, opt_seeds)]))
+                    con_c = mk(t, **({"om_floor": om_ref} if args.causal_mode == "floor" else {"om_cap": om_ref}))
+                    rep_rng = np.random.default_rng(args.rng_seed + 200 + rep)
+                    xc, fc, _ = dec.search(ev, con_c, "b", [ca], rep_rng, opt_seeds, args.budget_scale, args.restarts, log)
+                    ec = evaluate(ev, con, "b", xc, final_seeds)
+                    reps.append({"objective_b_c": fc, "b_c": ec, "om_ref": om_ref})
+                    log("  constrained repeat {} target {:.2f}: (a) {:.0f} (b) {:.0f} (b_c) {:.0f}".format(
+                        rep, t, mean_of(r["a"], "profit"), mean_of(r["b"], "profit"), mean_of(ec, "profit")))
+                result["repeats"].append({"target": t, "reps": reps, "mode": args.causal_mode})
+            result["wall_seconds"] = time.time() - clock
+            Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            Path(args.output).write_text(json.dumps(result, indent=1), encoding="utf-8")
+            log("done")
+            return result
         for t in targets if args.repeats else []:
             con, reps = mk(t), []
             for rep in range(args.repeats):
