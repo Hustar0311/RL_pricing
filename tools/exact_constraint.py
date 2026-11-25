@@ -32,6 +32,7 @@ S_LO, S_HI = dec.S_BOUNDS
 TOL = 0.003
 SLOPE0 = 1.4  # typical d(G/W)/ds, only for the first step
 MAX_ITER = 7
+OM_TOL = 0.002  # tolerance of the online-minutes feasibility filter (the (a) solution itself must stay feasible)
 
 
 def canon_of(p, d, s_bar):
@@ -48,17 +49,28 @@ class Solver:
         self.ev, self.con, self.seeds, self.log = ev, con, seeds, log
         self.monotone = True
         self.evals = 0
+        self.om_rule = None  # (mode, reference online minutes): causal feasibility filter ("floor": >= ref, "cap": <= ref)
 
     def measure(self, jobs):
-        """jobs: list of (p, d, s_bar) -> arrays of (G / W, profit) on the search days."""
+        """jobs: list of (p, d, s_bar) -> arrays of (G / W, profit, online minutes) on the search days."""
         rows = self.ev.run([canon_of(*j) for j in jobs], self.seeds)
         self.evals += len(jobs)
         ratio = np.array([np.mean([self.con.value(r) for r in rs]) / self.con.target for rs in rows])
         profit = np.array([np.mean([r["profit"] for r in rs]) for rs in rows])
-        return ratio, profit
+        om = np.array([np.mean([r["online_minutes"] for r in rs]) for rs in rows])
+        return ratio, profit, om
 
     def solve(self, cands):
         """cands: list of dict(p, d, s0).  Returns a list of dict(ok, s, profit, ratio, iters) (ok=False: unreachable)."""
+        out = self._solve(cands)
+        if self.om_rule is not None:  # causal filter on the interpolated online minutes of the solution
+            mode, ref = self.om_rule
+            for r in out:
+                if r["ok"] and not (r["om"] >= ref * (1 - OM_TOL) if mode == "floor" else r["om"] <= ref * (1 + OM_TOL)):
+                    r["ok"], r["profit"] = False, -np.inf
+        return out
+
+    def _solve(self, cands):
         if not self.monotone:
             return [self.scan(c) for c in cands]
         pts = [[] for _ in cands]
@@ -69,11 +81,11 @@ class Solver:
             active = [i for i, st in enumerate(state) if st == "run"]
             if not active:
                 break
-            ratio, profit = self.measure([(cands[i]["p"], cands[i]["d"], nxt[i]) for i in active])
+            ratio, profit, om = self.measure([(cands[i]["p"], cands[i]["d"], nxt[i]) for i in active])
             for k, i in enumerate(active):
-                pts[i].append((nxt[i], float(ratio[k]), float(profit[k])))
+                pts[i].append((nxt[i], float(ratio[k]), float(profit[k]), float(om[k])))
                 lo, hi = rng_s[i]
-                s, r, _ = pts[i][-1]
+                s, r = pts[i][-1][:2]
                 if abs(r - 1.0) < TOL:
                     state[i] = "ok"
                     continue
@@ -110,29 +122,30 @@ class Solver:
     @staticmethod
     def finish(points, state, srange, s0):
         if not points:
-            return {"ok": False, "s": s0, "profit": -np.inf, "ratio": np.nan, "iters": 0}
+            return {"ok": False, "s": s0, "profit": -np.inf, "ratio": np.nan, "iters": 0, "om": np.nan}
         q = min(points, key=lambda q: abs(q[1] - 1.0))
         ok = abs(q[1] - 1.0) < TOL * 1.5
-        s, profit = q[0], q[2]
+        s, profit, om = q[0], q[2], q[3]
         others = [o for o in points if o is not q and abs(o[1] - q[1]) > 1e-9]
         if ok and others:  # linear interpolation / tiny extrapolation to G = W
             o = min(others, key=lambda o: abs(o[1] - 1.0))
             f = (1.0 - q[1]) / (o[1] - q[1])
-            s, profit = q[0] + f * (o[0] - q[0]), q[2] + f * (o[2] - q[2])
+            s, profit, om = q[0] + f * (o[0] - q[0]), q[2] + f * (o[2] - q[2]), q[3] + f * (o[3] - q[3])
         return {"ok": bool(ok), "s": float(np.clip(s, *srange)), "profit": float(profit) if ok else -np.inf,
-                "ratio": q[1], "iters": len(points), "state": state}
+                "ratio": q[1], "iters": len(points), "state": state, "om": float(om)}
 
     def scan(self, c, step=0.025):
         lo, hi = s_range(c["d"])
         grid = np.arange(lo, hi + 1e-9, step)
-        ratio, profit = self.measure([(c["p"], c["d"], s) for s in grid])
-        best = {"ok": False, "s": c["s0"], "profit": -np.inf, "ratio": np.nan, "iters": len(grid)}
+        ratio, profit, om = self.measure([(c["p"], c["d"], s) for s in grid])
+        best = {"ok": False, "s": c["s0"], "profit": -np.inf, "ratio": np.nan, "iters": len(grid), "om": np.nan}
         for k in range(len(grid) - 1):
             if (ratio[k] - 1.0) * (ratio[k + 1] - 1.0) <= 0 and ratio[k] != ratio[k + 1]:
                 f = (1.0 - ratio[k]) / (ratio[k + 1] - ratio[k])
                 value = profit[k] + f * (profit[k + 1] - profit[k])
                 if value > best["profit"]:
-                    best = {"ok": True, "s": float(grid[k] + f * step), "profit": float(value), "ratio": 1.0, "iters": len(grid)}
+                    best = {"ok": True, "s": float(grid[k] + f * step), "profit": float(value), "ratio": 1.0, "iters": len(grid),
+                            "om": float(om[k] + f * (om[k + 1] - om[k]))}
         return best
 
     def check_monotone(self, points):
@@ -141,7 +154,7 @@ class Solver:
         for p, d in points:
             lo, hi = s_range(d)
             grid = np.arange(np.ceil(lo * 10) / 10, hi + 1e-9, 0.1)
-            ratio, _ = self.measure([(p, d, s) for s in grid])
+            ratio, _, _ = self.measure([(p, d, s) for s in grid])
             inc = bool(np.all(np.diff(ratio) > -0.002))
             report.append({"p": p, "d": list(map(float, d)), "s": grid.round(3).tolist(), "ratio": ratio.round(4).tolist(), "monotone": inc})
         self.monotone = all(r["monotone"] for r in report)
@@ -171,7 +184,7 @@ def search_b4(solver, a, w, rng, lam, gens):
     sigma, mu = 1.0, max(2, lam // 4)
     wt = np.log(mu + 0.5) - np.log(np.arange(1, mu + 1))
     wt /= wt.sum()
-    best = {"x": mean.copy(), "s": a["s"], "profit": a["profit"]}
+    best = {"x": np.r_[mean, 0.0], "s": a["s"], "profit": a["profit"]}  # (p, d1..d4)
     s_hint = a["s"]
     for g in range(gens):
         X = mean + sigma * scale * rng.standard_normal((lam, 4))
@@ -200,6 +213,14 @@ def search_b4(solver, a, w, rng, lam, gens):
     return best
 
 
+def local_a(solver, a):
+    """(a) near its previously found best price (+-0.05, step 0.025) at the solver's constraint level."""
+    ps = [round(a["p"] + 0.025 * k, 3) for k in range(-2, 3) if dec.P_BOUNDS[0] - 1e-9 <= a["p"] + 0.025 * k <= dec.P_BOUNDS[1] + 1e-9]
+    res = solver.solve([{"p": p, "d": np.zeros(4), "s0": a["s"]} for p in ps])
+    best = max(range(len(ps)), key=lambda i: res[i]["profit"])
+    return {"p": ps[best], "s": res[best]["s"], "profit": res[best]["profit"]} if np.isfinite(res[best]["profit"]) else None
+
+
 def block_weights(ev, seeds):
     rows = ev.run([np.r_[dec.BASELINE[0], dec.BASELINE[1]]], seeds)[0]
     m = np.mean([r["block_online"] for r in rows], axis=0)
@@ -210,7 +231,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scenario", required=True)
     ap.add_argument("--market", default="")
-    ap.add_argument("--form", choices=["hourly", "budget"], required=True)
+    ap.add_argument("--form", choices=["hourly", "budget", "per_trip"], required=True)
     ap.add_argument("--targets", required=True)
     ap.add_argument("--repeats", type=int, default=5)
     ap.add_argument("--opt_replicates", type=int, default=30)
@@ -223,6 +244,8 @@ def main(argv=None):
     ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--rng_seed", type=int, default=13579)
     ap.add_argument("--skip_monotone_check", action="store_true")
+    ap.add_argument("--no_causal", action="store_true", help="skip the online-minutes-constrained (b4)")
+    ap.add_argument("--reuse", default=None, help="earlier exact_constraint JSON with the same targets/seeds: reuse its (a) and (b4) solutions")
     ap.add_argument("--output", required=True)
     args = ap.parse_args(argv)
     overrides, _ = fr.setup(args)
@@ -231,6 +254,9 @@ def main(argv=None):
     log = lambda m: print("{:>6.0f}s {}".format(time.time() - clock, m), flush=True)
     result = {"scenario": args.scenario, "market": overrides, "form": args.form, "method": "exact_constraint", "second_kind": "b4",
               "final_seeds": final_seeds, "opt_replicates": args.opt_replicates, "repeats": [], "monotone_check": {}}
+    stored = json.loads(Path(args.reuse).read_text(encoding="utf-8")) if args.reuse else None
+    if stored is not None:
+        result["monotone_check"] = stored["monotone_check"]
     with mp.get_context("fork").Pool(args.workers) as pool:
         ev = dec.Evaluator(pool)
         base_final = ev.run([np.r_[dec.BASELINE[0], dec.BASELINE[1]]], final_seeds)[0]
@@ -242,29 +268,59 @@ def main(argv=None):
                 base = ev.run([np.r_[dec.BASELINE[0], dec.BASELINE[1]]], seeds)[0]
                 con = dec.Constraint(args.form, t, base)
                 solver = Solver(ev, con, seeds, log)
-                if rep == 0 and not args.skip_monotone_check:
+                if rep == 0 and not args.skip_monotone_check and stored is None:
                     pts = [(p, np.zeros(4)) for p in (0.8, 1.0, 1.275, 1.6, 2.0)] + [(1.2, np.array(d)) for d in ([0.2, 0.0, -0.1, -0.1], [-0.2, 0.1, 0.1, 0.0], [0.3, -0.1, -0.1, -0.1])]
                     result["monotone_check"][str(t)] = solver.check_monotone(pts)
                     log("[{} W={}] G monotone in s: {}".format(args.form, t, solver.monotone))
                 elif str(t) in result["monotone_check"]:
                     solver.monotone = all(r["monotone"] for r in result["monotone_check"][str(t)])
-                w = block_weights(ev, seeds)
-                a = search_a(solver)
+                if stored is not None:  # reuse the (a) and (b4) solutions of an earlier run (same seeds), add the new steps only
+                    old = next(x for x in stored["repeats"] if abs(x["target"] - t) < 1e-9)["reps"][rep]
+                    w = np.array(old["b"]["block_weights"])
+                    a = {"p": old["a"]["prices"][0], "s": old["a"]["shares"][0], "profit": old["a"]["search_profit"], "grid": old["a"]["price_grid"]}
+                else:
+                    w = block_weights(ev, seeds)
+                    a = search_a(solver)
                 if a is None:
                     log("[{} W={}] repeat {}: no feasible (a)".format(args.form, t, rep))
                     continue
                 log("[{} W={}] repeat {}: (a) p {:.3f} s {:.3f} search profit {:.0f}".format(args.form, t, rep, a["p"], a["s"], a["profit"]))
-                b = search_b4(solver, a, w, np.random.default_rng(args.rng_seed + 100 * rep + int(1000 * t)), args.lam, args.gens)
-                p_b, d_b = float(b["x"][0]), b["x"][1:]
                 canon_a = canon_of(a["p"], np.zeros(4), a["s"])
-                canon_b = canon_of(p_b, d_b, b["s"])
-                ea, eb = (ev.run([c], final_seeds)[0] for c in (canon_a, canon_b))
-                entry = {}
-                for key, canon, rows, src in (("a", canon_a, ea, a), ("b", canon_b, eb, b)):
-                    entry[key] = {"prices": canon[:4].tolist(), "shares": canon[4:].tolist(), "search_profit": src["profit"],
-                                  "days": fr.day_arrays(rows, con_final)}
-                entry["b"]["d"], entry["b"]["block_weights"] = d_b.tolist(), w.tolist()
-                entry["a"]["price_grid"] = a["grid"]
+                if stored is not None:
+                    entry = {"a": old["a"], "b": old["b"]}
+                    d_b, p_b = np.array(old["b"]["d"]), old["b"]["prices"][0]
+                else:
+                    b = search_b4(solver, a, w, np.random.default_rng(args.rng_seed + 100 * rep + int(1000 * t)), args.lam, args.gens)
+                    p_b, d_b = float(b["x"][0]), b["x"][1:]
+                    canon_b = canon_of(p_b, d_b, b["s"])
+                    ea, eb = (ev.run([c], final_seeds)[0] for c in (canon_a, canon_b))
+                    entry = {}
+                    for key, canon, rows, src in (("a", canon_a, ea, a), ("b", canon_b, eb, b)):
+                        entry[key] = {"prices": canon[:4].tolist(), "shares": canon[4:].tolist(), "search_profit": src["profit"],
+                                      "days": fr.day_arrays(rows, con_final)}
+                    entry["b"]["d"], entry["b"]["block_weights"] = d_b.tolist(), w.tolist()
+                    entry["a"]["price_grid"] = a["grid"]
+                # local slope of the (a) frontier: exact (a) solutions at 0.99 W and 1.01 W (p within +-0.05 of the best price)
+                for key, mult in (("a_lo", 0.99), ("a_hi", 1.01)):
+                    con_m = dec.Constraint(args.form, t * mult, base)
+                    solver_m = Solver(ev, con_m, seeds, log)
+                    solver_m.monotone = solver.monotone
+                    am = local_a(solver_m, a)
+                    if am is None:
+                        continue
+                    cm = canon_of(am["p"], np.zeros(4), am["s"])
+                    entry[key] = {"prices": cm[:4].tolist(), "shares": cm[4:].tolist(), "search_profit": am["profit"],
+                                  "days": fr.day_arrays(ev.run([cm], final_seeds)[0], con_final)}
+                # causal test: (b4) restricted to at least (hourly) / at most (budget) (a)'s online minutes
+                if args.form in ("hourly", "budget") and not args.no_causal:
+                    om_ref = float(np.mean([r["online_minutes"] for r in ev.run([canon_a], seeds)[0]]))
+                    solver.om_rule = ("floor" if args.form == "hourly" else "cap", om_ref)
+                    bc = search_b4(solver, a, w, np.random.default_rng(args.rng_seed + 100 * rep + int(1000 * t) + 7), args.lam, args.gens)
+                    solver.om_rule = None
+                    canon_c = canon_of(float(bc["x"][0]), bc["x"][1:], bc["s"])
+                    entry["bc"] = {"prices": canon_c[:4].tolist(), "shares": canon_c[4:].tolist(), "d": bc["x"][1:].tolist(), "om_ref": om_ref,
+                                   "mode": "floor" if args.form == "hourly" else "cap", "search_profit": bc["profit"],
+                                   "days": fr.day_arrays(ev.run([canon_c], final_seeds)[0], con_final)}
                 entry["solver_evals"] = solver.evals
                 reps.append(entry)
                 da = float(np.mean(entry["b"]["days"]["profit"]) - np.mean(entry["a"]["days"]["profit"]))
