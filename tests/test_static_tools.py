@@ -103,14 +103,15 @@ class StaticToolTests(unittest.TestCase):
     def test_exact_constraint_secant_finds_root_and_interpolates(self):
         from tools.exact_constraint import Solver, s_range
         f = lambda s: 0.4 + 1.2 * s  # G/W as a function of s, root at s = 0.5
-        pts = [(0.3, f(0.3), 10.0 - 4 * 0.3)]
+        pts = [(0.3, f(0.3), 10.0 - 4 * 0.3, 100.0 - 10 * 0.3)]
         for _ in range(4):
             s = Solver.step(pts, 0.1, 1.3)
-            pts.append((s, f(s), 10.0 - 4 * s))
+            pts.append((s, f(s), 10.0 - 4 * s, 100.0 - 10 * s))
         out = Solver.finish(pts, "ok", s_range(np.zeros(4)), 0.3)
         self.assertTrue(out["ok"])
         self.assertAlmostEqual(out["s"], 0.5, places=3)
         self.assertAlmostEqual(out["profit"], 8.0, places=2)
+        self.assertAlmostEqual(out["om"], 95.0, places=1)
         # shifts d_k tighten the admissible s_bar range
         lo, hi = s_range(np.array([0.3, 0.0, -0.2, -0.1]))
         self.assertAlmostEqual(lo, 0.1 + 0.2)
