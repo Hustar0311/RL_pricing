@@ -4,7 +4,7 @@ For each target of a --repeats JSON the repeat whose Delta = profit(second) - pr
 selected (lower median for an even count); both solutions are re-simulated on the evaluation days (seeds 5000-5019,
 warm-up 480) and, per six-hour block, the mean over days of: posted price, driver share (mean over zone groups),
 online vehicle-minutes, served orders, entering demand (passengers who accept the posted price) and potential demand
-(the exogenous request counts) are drawn side by side.  One figure per JSON (= per constraint form).
+(the exogenous request counts), mean wait per served order and number of timed-out leaving passengers are drawn side by side.  One figure per JSON (= per constraint form).
 usage: mechanism_plots.py --scenario S --market k=v,... --repeats_json J --label NAME --output_dir D
 """
 import argparse
@@ -52,7 +52,9 @@ def summarize(canon, seeds, pool, scenario):
     potential = np.array([scenario.dd_test[b * dec.BLOCK_MINUTES:(b + 1) * dec.BLOCK_MINUTES].sum() for b in range(dec.BLOCKS)])
     prices, shares = np.asarray(canon[:dec.BLOCKS]), np.asarray(canon[dec.BLOCKS:]).reshape(dec.BLOCKS, 2).mean(axis=1)
     profit = block_means(traces, "net_profit")
-    return {"price": prices.tolist(), "share": shares.tolist(), "online_minutes": online.tolist(), "served": served.tolist(),
+    wait = block_means(traces, "wait_minutes") / np.maximum(served, 1e-9)  # mean wait per served order (minutes)
+    left = block_means(traces, "left")  # passengers who time out and leave
+    return {"wait_per_order": wait.tolist(), "left": left.tolist(), "price": prices.tolist(), "share": shares.tolist(), "online_minutes": online.tolist(), "served": served.tolist(),
             "entered": entered.tolist(), "potential_demand": potential.tolist(), "profit": profit.tolist(),
             "profit_total": float(profit.sum())}
 
@@ -95,9 +97,10 @@ def draw(result, path, second):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     rows = [("price", "posted price"), ("share", "driver share"), ("online_minutes", "online vehicle-minutes"),
-            ("served", "served orders"), ("entered", "entering demand")]
+            ("served", "served orders"), ("entered", "entering demand"), ("wait_per_order", "wait per order (min)"),
+            ("left", "passengers leaving (timeout)")]
     n = len(result["targets"])
-    fig, axes = plt.subplots(len(rows), n, figsize=(5.2 * n, 2.4 * len(rows)), sharex=True, squeeze=False)
+    fig, axes = plt.subplots(len(rows), n, figsize=(5.2 * n, 2.2 * len(rows)), sharex=True, squeeze=False)
     x = np.arange(dec.BLOCKS)
     for j, entry in enumerate(result["targets"]):
         for i, (key, title) in enumerate(rows):
@@ -108,7 +111,7 @@ def draw(result, path, second):
                 ax.plot(x, entry["a"]["potential_demand"], "k--", lw=1, label="potential demand")
             ax.set_ylabel(title, fontsize=8)
             if i == 0:
-                ax.set_title("{} budget {} ($\\Delta$ = {:+.0f})".format(result["label"], entry["target"], entry["deltas"][entry["median_repeat"]]), fontsize=9)
+                ax.set_title("{} W={} ($\\Delta$ = {:+.0f})".format(result["label"], entry["target"], entry["deltas"][entry["median_repeat"]]), fontsize=9)
             if i == 0 and j == 0:
                 ax.legend(fontsize=7)
         axes[-1][j].set_xticks(x)

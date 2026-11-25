@@ -119,7 +119,8 @@ def run_job(job):
             "entered": trace[:, col("entered")].sum(), "wait": trace[:, col("wait_minutes")].sum() / served,
             "pickup": trace[:, col("pickup_minutes")].sum() / served, "empty_minutes": trace[:, col("empty_minutes")].sum(),
             "left": trace[:, col("left")].sum(), "online_minutes": minutes,
-            "trip_distance": trace[:, col("trip_distance")].sum(), "trip_minutes": trace[:, col("trip_minutes")].sum()}
+            "trip_distance": trace[:, col("trip_distance")].sum(), "trip_minutes": trace[:, col("trip_minutes")].sum(),
+            "block_online": [trace[b * BLOCK_MINUTES:(b + 1) * BLOCK_MINUTES, col("online_vehicles")].sum() for b in range(BLOCKS)]}
 
 
 class Evaluator:
@@ -252,7 +253,7 @@ def search(ev, con, kind, warm, rng, seeds, budget_scale, restarts, log):
 
 # ----------------------------------------------------------------------------- reporting
 def summarize(rows, con):
-    out = {k: float(np.mean([r[k] for r in rows])) for k in rows[0]}
+    out = {k: float(np.mean([r[k] for r in rows])) for k in rows[0] if k != "block_online"}
     values = np.array([con.value(r) for r in rows])
     out["constraint_value"] = float(values.mean())
     out["constraint_ratio"] = float(values.mean() / con.target)
