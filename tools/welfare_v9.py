@@ -1,8 +1,9 @@
-"""Welfare table of a setting: (a), (b4) and the online-minutes-constrained (b4) of the median-Delta repeat.
+"""Welfare table of a setting: (a), (b4) and the online-minutes-constrained (b4), over all repeats.
 
-Re-simulates the three stored solutions of the repeat whose raw Delta = profit(b4) - profit(a) is the median over repeats
-on the evaluation days (seeds of the JSON) and reports platform profit, passenger (consumer) surplus - whole day and per
-six-hour block -, driver net income, driver hourly wage, served orders, timed-out leaving passengers and mean wait.
+Re-simulates (no new search) the stored solutions of every repeat on the evaluation days (seeds of the JSON) and reports,
+as min / median / max over the repeats: platform profit, passenger (consumer) surplus - whole day and per six-hour block -,
+driver net income, driver hourly wage, served orders (service quality: mean wait, timed-out leaving passengers).
+The markdown has two parts: passenger surplus, and service quality.
 usage: welfare_v9.py --scenario S --market k=v,... --json J --label L --output_dir D
 """
 import argparse
@@ -34,6 +35,28 @@ def metrics(traces):
             "mean_wait": tot("wait_minutes") / served, "online_minutes": online, "profit_blocks": blk("net_profit")}
 
 
+FIELDS = [("profit", "平台利润", 0), ("driver_income", "司机净收入", 0), ("hourly_wage", "司机时薪", 1), ("online_minutes", "在线分钟", 0), ("served", "服务单量", 0)]
+QUALITY = [("mean_wait", "平均等待(分钟)", 2), ("left", "超时离开人数", 0)]
+
+
+def flat(m):
+    out = {k: m[k] for k in ("profit", "consumer_surplus", "driver_income", "hourly_wage", "online_minutes", "served", "left", "mean_wait")}
+    out.update({"cs_" + BLOCKS[i]: m["cs_blocks"][i] for i in range(4)})
+    return out
+
+
+def mmm(values, nd):
+    v = np.array(values, dtype=float)
+    return "{0:.{n}f} / {1:.{n}f} / {2:.{n}f}".format(v.min(), np.median(v), v.max(), n=nd)
+
+
+def table(rows, names, per, label_decimals):
+    lines = ["| 指标 | " + " | ".join(n for _, n in names) + " |", "|---|" + "---|" * len(names)]
+    for key, label, nd in label_decimals:
+        lines.append("| {} | ".format(label) + " | ".join(mmm([r[key] for r in per[k]], nd) for k, _ in names) + " |")
+    return lines
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--scenario", required=True)
@@ -48,30 +71,24 @@ def main(argv=None):
     doc = json.loads(Path(args.json).read_text(encoding="utf-8"))
     seeds = doc["final_seeds"]
     out = {"label": args.label, "targets": {}}
+    lines = []
     with mp.get_context("fork").Pool(args.workers) as pool:
         for item in doc["repeats"]:
-            deltas = [np.mean(r["b"]["days"]["profit"]) - np.mean(r["a"]["days"]["profit"]) for r in item["reps"]]
-            idx = int(np.argsort(deltas)[(len(deltas) - 1) // 2])
-            rep = item["reps"][idx]
-            entry = {"repeat": idx, "delta": deltas[idx]}
+            per = {}
             for key in ("a", "b", "bc"):
-                if key in rep:
-                    canon = np.r_[rep[key]["prices"], rep[key]["shares"]]
-                    entry[key] = metrics(pool.map(day_trace, [(canon, s) for s in seeds]))
-            out["targets"][str(item["target"])] = entry
+                if key in item["reps"][0]:
+                    per[key] = []
+                    for rep in item["reps"]:
+                        canon = np.r_[rep[key]["prices"], rep[key]["shares"]]
+                        per[key].append(flat(metrics(pool.map(day_trace, [(canon, s) for s in seeds]))))
+            out["targets"][str(item["target"])] = {"n_repeats": len(item["reps"]), "per_repeat": per}
+            names = [(k, n) for k, n in (("a", "(a)"), ("b", "(b4)"), ("bc", "(b4) 受限")) if k in per]
+            lines += ["", "### {} W̄={}（{} 次重复，每格为 最小 / 中位 / 最大）".format(args.label, item["target"], len(item["reps"])), "",
+                      "#### 平台与司机", ""] + table(None, names, per, FIELDS)
+            lines += ["", "#### 乘客剩余", ""] + table(None, names, per, [("consumer_surplus", "乘客剩余（全天）", 0)] + [("cs_" + b, "乘客剩余 " + b, 0) for b in BLOCKS])
+            lines += ["", "#### 服务质量", ""] + table(None, names, per, QUALITY)
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
     (Path(args.output_dir) / (args.label + ".json")).write_text(json.dumps(out, indent=1), encoding="utf-8")
-    lines = []
-    for t, e in out["targets"].items():
-        names = [(k, n) for k, n in (("a", "(a)"), ("b", "(b4)"), ("bc", "(b4) 受限")) if k in e]
-        lines += ["", "### {} W̄={}（第 {} 次重复，Δ={:+.0f}）".format(args.label, t, e["repeat"], e["delta"]), "",
-                  "| 指标 | " + " | ".join(n for _, n in names) + " |", "|---|" + "---|" * len(names)]
-        rows = [("平台利润", lambda m: m["profit"]), ("乘客剩余（全天）", lambda m: m["consumer_surplus"])]
-        rows += [("乘客剩余 " + BLOCKS[i], (lambda i: lambda m: m["cs_blocks"][i])(i)) for i in range(4)]
-        rows += [("司机净收入", lambda m: m["driver_income"]), ("司机时薪", lambda m: m["hourly_wage"]), ("在线分钟", lambda m: m["online_minutes"]),
-                 ("服务单量", lambda m: m["served"]), ("超时离开人数", lambda m: m["left"]), ("平均等待(分钟)", lambda m: m["mean_wait"])]
-        for label, f in rows:
-            lines.append("| {} | ".format(label) + " | ".join("{:.2f}".format(f(e[k])) if "等待" in label else "{:.0f}".format(f(e[k])) for k, _ in names) + " |")
     (Path(args.output_dir) / (args.label + ".md")).write_text("\n".join(lines) + "\n", encoding="utf-8")
     return out
 

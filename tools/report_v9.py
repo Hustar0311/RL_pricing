@@ -4,7 +4,9 @@ For every v9 JSON (exact_constraint output) and repeat:
   slope  = d profit / d G of the (a) frontier from the exact (a) solutions at 0.99 W and 1.01 W (evaluation-day means)
   Delta_adj  = [profit(b4) + slope * (G_a - G_b4)] - profit(a)          (b4 moved to (a)'s realised G)
   Delta_c    = same for the constrained b4 (hourly: online minutes >= (a), budget: <= (a))
-  attributable share = Delta_c / Delta_adj (per repeat; median-over-median and the range over repeats)
+  retained share (保留比例) = Delta_c / Delta_adj: the part of the gain kept once the online-minutes restriction is imposed
+  online-minutes share (可归因于在线分钟的比例) = 1 - retained share (the range is the converted retained range)
+  both per repeat; median-over-median and the range over repeats
 Writes summary.md / summary.json and figures (Delta_adj and online-minutes change vs W, three constraint forms).
 usage: report_v9.py --v9 DIR --output_dir DIR
 """
@@ -27,7 +29,7 @@ def rep_stats(rep):
             gc = m("bc", "g_rel")
             out["delta_c"] = m("bc", "profit") + out["slope"] * (out["g_a"] - gc) - out["profit_a"]
             out["om_diff_c"] = m("bc", "online_minutes") - m("a", "online_minutes")
-            out["share"] = out["delta_c"] / out["delta_adj"] if out["delta_adj"] > 0 else np.nan
+            out["retained"] = out["delta_c"] / out["delta_adj"] if out["delta_adj"] > 0 else np.nan
     return out
 
 
@@ -50,12 +52,15 @@ def main(argv=None):
             stats = [rep_stats(r) for r in item["reps"]]
             keys = {k: [s[k] for s in stats if k in s] for k in stats[0]}
             entry = {"name": path.stem, "form": doc["form"], "target": item["target"], "n": len(stats)}
-            for k in ("delta_raw", "delta_adj", "delta_c", "om_diff", "om_diff_c", "share", "slope"):
+            for k in ("delta_raw", "delta_adj", "delta_c", "om_diff", "om_diff_c", "retained", "slope"):
                 if k in keys:
                     entry[k] = summarize(keys[k])
+            if "retained" in entry:
+                entry["attributable"] = (1 - entry["retained"][2], 1 - entry["retained"][1], 1 - entry["retained"][0])
             entry["profit_a_median"] = float(np.median(keys["profit_a"]))
             if "delta_c" in keys and "delta_adj" in keys:
-                entry["share_median_over_median"] = float(np.median(keys["delta_c"]) / np.median(keys["delta_adj"])) if np.median(keys["delta_adj"]) > 0 else float("nan")
+                entry["retained_median_over_median"] = float(np.median(keys["delta_c"]) / np.median(keys["delta_adj"])) if np.median(keys["delta_adj"]) > 0 else float("nan")
+                entry["attributable_median_over_median"] = 1 - entry["retained_median_over_median"]
             summary[path.stem] = entry
             rows.append(entry)
     out = Path(args.output_dir)
@@ -63,13 +68,14 @@ def main(argv=None):
     (out / "summary.json").write_text(json.dumps(summary, indent=1), encoding="utf-8")
     f3 = lambda t: "{:+.0f} / {:+.0f} / {:+.0f}".format(*t)
     lines = ["# v9 汇总", "", "Δ 单位为利润；每格为 最小 / 中位 / 最大（5 次重复，20 个评估日）。Δ_adj 把 (b4) 折算到 (a) 实际 G；Δ_c 为在线分钟受限的 (b4)（时薪：≥(a)，预算：≤(a)）。", "",
-             "| 设置 | W̄ | 原始 Δ | 修正 Δ | 受限 Δ_c | 可归因比例 (中位/中位；范围) | 在线分钟 (b4)−(a) | 斜率 dΠ/dG |", "|---|---|---|---|---|---|---|---|"]
+             "| 设置 | W̄ | 原始 Δ | 修正 Δ | 受限 Δ_c | 保留比例 (中位/中位；范围) | 可归因于在线分钟的比例 (中位/中位；范围) | 在线分钟 (b4)−(a) | 斜率 dΠ/dG |", "|---|---|---|---|---|---|---|---|---|"]
     for e in sorted(rows, key=lambda e: (e["name"].split("_")[0], e["form"], e["name"])):
-        share = "—"
-        if "share_median_over_median" in e:
-            share = "{:.2f}；{:.2f}–{:.2f}".format(e["share_median_over_median"], e["share"][0], e["share"][2])
-        lines.append("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
-            e["name"], e["target"], f3(e["delta_raw"]), f3(e["delta_adj"]) if "delta_adj" in e else "—", f3(e["delta_c"]) if "delta_c" in e else "—", share,
+        share = attr = "—"
+        if "retained_median_over_median" in e:
+            share = "{:.2f}；{:.2f}–{:.2f}".format(e["retained_median_over_median"], e["retained"][0], e["retained"][2])
+            attr = "{:.2f}；{:.2f}–{:.2f}".format(e["attributable_median_over_median"], e["attributable"][0], e["attributable"][2])
+        lines.append("| {} | {} | {} | {} | {} | {} | {} | {} | {} |".format(
+            e["name"], e["target"], f3(e["delta_raw"]), f3(e["delta_adj"]) if "delta_adj" in e else "—", f3(e["delta_c"]) if "delta_c" in e else "—", share, attr,
             f3(e["om_diff"]), "{:.0f}".format(e["slope"][1]) if "slope" in e else "—"))
     (out / "summary.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
     print("\n".join(lines))
